@@ -81,6 +81,8 @@ spec.num_ofdm  = 20;
 spec.pad_len   = 200;
 spec.seed      = 12345;                % 固定種子：TX/RX 靠它產生相同 payload
 spec.data_sc   = setdiff(spec.active_sc, spec.pilot_sc);
+spec.crc_len = 16;     % CRC 佔 16 bits
+spec.data_bits_per_frame = spec.num_ofdm * length(spec.data_sc) * log2(spec.qam_num) - spec.crc_len;
 
 %% ===== 重建參考訊號（與 TX 端產生的內容相同）======================
 sts = gen_sts();   sts = sts / rms(sts);
@@ -88,6 +90,7 @@ lts = gen_lts();   lts = lts / rms(lts);
 rng(spec.seed);    % 固定種子，確保與 TX 產生相同 payload
 [ofdm_data, tx_bits, tx_data_syms, pilot_syms] = ...
     gen_ofdm_data(spec.num_ofdm, spec.qam_num);
+[tx_bits, crc_bits] = append_crc(tx_bits, spec.crc_len);
 
 frame_len   = 2*spec.pad_len + length(sts) + length(lts) + length(ofdm_data);
 lts_f_known = fftshift(fft(lts(33:96)));        % 已知 LTS 的頻域樣式
@@ -100,13 +103,23 @@ fprintf('Frame 長度 = %d samples，每 frame 資料量 = %d bits\n', ...
 % 必須與 jam_tx.m 的 make_schedule 同序：baseline，然後每個 mode 依 modeTypes 列出 type。
 % Mode 2 (STS 粗 CFO) 沒有 noise 變體 — 純雜訊只是「STS 雜訊」，跟 mode 1 重複。
 % 這份 modeTypes 必須與 jam_tx.m 的 make_schedule 內完全一致。
-attackNames = {'TODO2 STS時間同步','TODO3 STS粗CFO','TODO4 LTS細CFO', ...
-               'TODO5 pilot CFO','TODO6 LTS通道估計','TODO7 CP','TODO8 高功率覆蓋', ...
-               'TODO9 Broadband Jamming'};
-modeTypes   = {[1 2], [2], [1 2], [1 2], [1 2], [1 2], [1 2]};
+attackNames = { ...
+        'TODO2  STS 時間同步攻擊'; ...
+        'TODO3  STS 粗 CFO 攻擊'; ...
+        'TODO4  LTS 細 CFO 攻擊'; ...
+        'TODO5  pilot CFO 攻擊'; ...
+        'TODO6  LTS 通道估計攻擊'; ...
+        'TODO7  CP 循環卷積攻擊'; ...
+        'TODO8  高功率資料覆蓋 (flower)'; ...
+        'TODO9  Broadband Constant Jamming'; ...
+        'TODO9-2  限頻AWGN'; ...
+        'TODO10 單頻CW'; ...
+        'TODO11 多頻CW'; ...
+        'TODO12 假Frame覆蓋'};
+modeTypes   = {[1 2], [2], [1 2], [1 2], [1 2], [1 2], [1 2], [1 2], [2], [2], [2], [2]};
 phaseLabels = {'NO ATTACK'};
 phaseModes  = 0;    % 每個階段對應的 attack mode（0 = baseline）；給 pickRxConfig 查
-for mm = 1:7
+for mm = 1:length(attackNames)
     for tt = modeTypes{mm}
         if tt == 1, tn = 'noise'; else, tn = 'struct'; end
         phaseLabels{end+1} = sprintf('%s(%s)', attackNames{mm}, tn); %#ok<SAGROW>
@@ -448,6 +461,32 @@ function res = processCapture(data, sts, lts, frame_len, spec, ...
         s = eq_data(:,k); s(~isfinite(s)) = 0;
         rx_bits(:,k) = qamdemod(s, qam_num, 'OutputType','bit','UnitAveragePower',true);
     end
+    rx_bits_vec = rx_bits(:);
+    
+    % === CRC 驗證 ===
+    data_bits_len = length(rx_bits_vec) - spec.crc_len;
+    if data_bits_len > 0
+        rx_data_bits = rx_bits_vec(1:data_bits_len);
+        rx_crc_bits = rx_bits_vec(data_bits_len+1:end);
+        
+        % 重新計算 CRC
+        calc_crc = mod(sum(rx_data_bits), 2^spec.crc_len);
+        calc_crc_bits = de2bi(calc_crc, spec.crc_len, 'left-msb')';
+        
+        crc_pass = isequal(rx_crc_bits, calc_crc_bits);
+    else
+        crc_pass = false;
+    end
+    
+        % === BER 計算 (只用資料部分，不含 CRC) ===
+    if data_bits_len > 0
+        tx_data_bits = tx_bits(1:data_bits_len);
+        bit_errors = sum(rx_data_bits ~= tx_data_bits);
+        res.ber = bit_errors / data_bits_len;
+    else
+        res.ber = 1;
+    end
+    
     res.ber = sum(rx_bits(:) ~= tx_bits(:)) / numel(tx_bits);
 
     % --- SNR（EVM-like）---
@@ -620,6 +659,15 @@ function [ofdm_data, tx_bits, tx_data_syms, pilot_syms] = gen_ofdm_data(num_ofdm
         ofdm_data(idx) = x_cp;
         tx_bits(:,s) = db; tx_data_syms(:,s) = ds; pilot_syms(:,s) = ps;
     end
+end
+
+function [tx_bits_with_crc, crc_bits] = append_crc(tx_bits, crc_len)
+% 簡單的 CRC-16-CCITT 模擬 (可換成真 CRC)
+    data_bits = tx_bits(:);
+    % 模擬 CRC：對 data 做 xor 累加
+    crc = mod(sum(data_bits), 2^crc_len);
+    crc_bits = de2bi(crc, crc_len, 'left-msb')';
+    tx_bits_with_crc = [data_bits; crc_bits];
 end
 
 function dash = makeDashboard()

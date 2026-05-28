@@ -48,6 +48,14 @@ knob.flower_petals   = 6;        % mode7: flower 星座花瓣數
 % --- (D) RF 前端增益 -----------------------------------------------
 cfg.gain = 15;                   % 兩通道共用：太弱調高、爆掉調低
 
+% --- (E) 任務一：新增的 Jammer 參數 ---------------------------------
+knob.awgn_bw_ratio   = [0.2, 0.5, 1.0];   % 不同頻寬比例 (相對於訊號頻寬)
+knob.single_tone_freq = 100e3;             % 單頻訊號頻率偏移 (Hz)
+knob.multi_tone_freqs = [50e3, 120e3, 200e3]; % 多個單頻訊號頻率
+knob.multi_tone_amps  = [1.0, 0.8, 0.6];   % 對應振幅
+
+knob.broadband_power = 1;   % mode8 寬頻干擾強度
+
 %% =====================================================================
 %% ===========  Hardware / display (rarely change)  ====================
 %% =====================================================================
@@ -221,13 +229,17 @@ function sched = make_schedule(cfg)
         'TODO6  LTS 通道估計攻擊'; ...
         'TODO7  CP 循環卷積攻擊'; ...
         'TODO8  高功率資料覆蓋 (flower)'; ...
-        'TODO9  Broadband Constant Jamming'};
+        'TODO9  Broadband Constant Jamming'; ...
+        'TODO9-2  限頻AWGN'; ...
+        'TODO10 單頻CW'; ...
+        'TODO11 多頻CW'; ...
+        'TODO12 假Frame覆蓋'};
     typeName = {'noise', 'structured'};
     % 每個 mode 允許的 jam_type；mode 2 (STS 粗 CFO) 沒有 noise 變體。
-    modeTypes = {[1 2], [2], [1 2], [1 2], [1 2], [1 2], [1 2]};
+    modeTypes = {[1 2], [2], [1 2], [1 2], [1 2], [1 2], [1 2], [1 2], [2], [2], [2], [2]};
     if cfg.runBothTypes, allowed = [1 2]; else, allowed = cfg.jamType; end
     sched = struct('mode', 0, 'type', 0, 'label', 'NO ATTACK (baseline)');
-    for m = 1:8
+    for m = 1:length(labels)
         for t = intersect(modeTypes{m}, allowed)
             sched(end+1) = struct('mode', m, 'type', t, ...
                 'label', sprintf('%s（type=%d %s）', labels{m}, t, typeName{t})); %#ok<AGROW>
@@ -418,6 +430,58 @@ function jammer = build_jammer(attack_mode, jam_type, tx_signal, info, fs, knob)
             idx = 1:N;
             jammer(idx) = knob.broadband_power * 2 * tx_rms * (randn(N,1) + 1j*randn(N,1)) / sqrt(2);
         end
+    end
+        
+    % (9) mode 9 : 不同頻寬的 AWGN
+    if attack_mode == 9
+        % 對訊號做 FFT，只對部分頻段加雜訊
+        Nfft = 256;
+        X = fft(tx_signal, Nfft);
+        bw_ratio = knob.awgn_bw_ratio(min(jam_type, length(knob.awgn_bw_ratio)));
+        bw_bins = round(Nfft * bw_ratio);
+        center_bin = Nfft/2 + 1;
+        start_bin = center_bin - floor(bw_bins/2);
+        end_bin = center_bin + floor(bw_bins/2);
+        
+        noise_fd = zeros(Nfft, 1);
+        noise_fd(start_bin:end_bin) = (randn(bw_bins,1) + 1j*randn(bw_bins,1)) / sqrt(2);
+        noise_td = real(ifft(noise_fd, Nfft));
+        noise_td = repmat(noise_td, ceil(N/Nfft), 1);
+        noise_td = noise_td(1:N);
+        
+        jammer = jam_power_scale * tx_rms * noise_td;
+    end
+
+    % (10) mode 10 : 單頻連續波 (CW)
+    if attack_mode == 10
+        t = (0:N-1)' / fs;
+        single_tone = cos(2*pi*knob.single_tone_freq * t) + ...
+                      1j*sin(2*pi*knob.single_tone_freq * t);
+        jammer = jam_power_scale * tx_rms * single_tone;
+    end
+
+    % (11) mode 11 : 多個單頻訊號
+    if attack_mode == 11
+        t = (0:N-1)' / fs;
+        multi_tone = zeros(N, 1);
+        for k = 1:length(knob.multi_tone_freqs)
+            multi_tone = multi_tone + ...
+                knob.multi_tone_amps(k) * exp(1j*2*pi*knob.multi_tone_freqs(k)*t);
+        end
+        multi_tone = multi_tone / rms(multi_tone);
+        jammer = jam_power_scale * tx_rms * multi_tone;
+    end
+
+    % (12) mode 12 : 完整 frame 覆蓋 (自訂 data)
+    if attack_mode == 12
+        % 自訂一個假的完整 frame
+        fake_sts = gen_sts();
+        fake_lts = gen_lts();
+        rng(999); % 固定自訂 data
+        [fake_ofdm, ~, ~, ~] = gen_ofdm_data(spec.num_ofdm, spec.qam_num);
+        fake_frame = [zeros(spec.pad_len,1); fake_sts; fake_lts; fake_ofdm; zeros(spec.pad_len,1)];
+        fake_frame = jam_power_scale * tx_rms * fake_frame / rms(fake_frame);
+        jammer = fake_frame;
     end
 
     % whole-frame RMS 正規化：讓 rms(jammer)/rms(tx_signal) == 旋鈕值
