@@ -49,6 +49,6 @@
 * [x] 結構化實體層攻擊 (TODO2 ~ TODO8) 實作與整合。
 * [x] 寬頻 / 限頻 / CW / 假 frame 覆蓋攻擊 (TODO9 ~ TODO12) 實作與整合。
 * [x] mode 9 (限頻 AWGN) 自動 BW sweep 機制。
-* [x] 發送端 (TX) 的 ECC (CRC-16) 防禦封裝設計。
-* [x] 接收端 (RX) 的 CRC-16 完整性驗證邏輯。
+* [x] 發送端 (TX) 的 CRC-16 ECC 封裝雛形（`jammer1.m` 沙盒；`jam_tx.m` 線上發射尚未串接）。
+* [ ] **待完成：CRC-16 端到端整合。** 目前 `jam_tx.m` 在 frame 內並未實際附加 CRC，`jam_monitor.m` 內已備有 `append_crc` scaffolding 但暫未啟用驗證，因為 TX 還沒對齊。
 * [ ] 對抗 jammer 的調適性策略 (例如 frequency hopping、interleaving + FEC) 與量化評估。

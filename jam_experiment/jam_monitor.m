@@ -90,7 +90,10 @@ lts = gen_lts();   lts = lts / rms(lts);
 rng(spec.seed);    % 固定種子，確保與 TX 產生相同 payload
 [ofdm_data, tx_bits, tx_data_syms, pilot_syms] = ...
     gen_ofdm_data(spec.num_ofdm, spec.qam_num);
-[tx_bits, crc_bits] = append_crc(tx_bits, spec.crc_len);
+% 注意：jam_tx.m 目前在 frame 內未附加 CRC（只送 ofdm_data），所以這裡保留
+% tx_bits 為 2D [bits_per_sym × num_ofdm]，BER 用 raw bits 比對。
+% CRC 端到端驗證待 TX 端先支援後再啟用：
+%   [tx_bits_with_crc, crc_bits] = append_crc(tx_bits, spec.crc_len);
 
 frame_len   = 2*spec.pad_len + length(sts) + length(lts) + length(ofdm_data);
 lts_f_known = fftshift(fft(lts(33:96)));        % 已知 LTS 的頻域樣式
@@ -471,32 +474,6 @@ function res = processCapture(data, sts, lts, frame_len, spec, ...
         s = eq_data(:,k); s(~isfinite(s)) = 0;
         rx_bits(:,k) = qamdemod(s, qam_num, 'OutputType','bit','UnitAveragePower',true);
     end
-    rx_bits_vec = rx_bits(:);
-    
-    % === CRC 驗證 ===
-    data_bits_len = length(rx_bits_vec) - spec.crc_len;
-    if data_bits_len > 0
-        rx_data_bits = rx_bits_vec(1:data_bits_len);
-        rx_crc_bits = rx_bits_vec(data_bits_len+1:end);
-        
-        % 重新計算 CRC
-        calc_crc = mod(sum(rx_data_bits), 2^spec.crc_len);
-        calc_crc_bits = de2bi(calc_crc, spec.crc_len, 'left-msb')';
-        
-        crc_pass = isequal(rx_crc_bits, calc_crc_bits);
-    else
-        crc_pass = false;
-    end
-    
-        % === BER 計算 (只用資料部分，不含 CRC) ===
-    if data_bits_len > 0
-        tx_data_bits = tx_bits(1:data_bits_len);
-        bit_errors = sum(rx_data_bits ~= tx_data_bits);
-        res.ber = bit_errors / data_bits_len;
-    else
-        res.ber = 1;
-    end
-    
     res.ber = sum(rx_bits(:) ~= tx_bits(:)) / numel(tx_bits);
 
     % --- SNR（EVM-like）---
