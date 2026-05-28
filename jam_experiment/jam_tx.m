@@ -224,10 +224,10 @@ function sched = make_schedule(cfg)
         'TODO9  Broadband Constant Jamming'};
     typeName = {'noise', 'structured'};
     % 每個 mode 允許的 jam_type；mode 2 (STS 粗 CFO) 沒有 noise 變體。
-    modeTypes = {[1 2], [2], [1 2], [1 2], [1 2], [1 2], [1 2]};
+    modeTypes = {[1 2], [2], [1 2], [1 2], [1 2], [1 2], [1 2], [1 2]};
     if cfg.runBothTypes, allowed = [1 2]; else, allowed = cfg.jamType; end
     sched = struct('mode', 0, 'type', 0, 'label', 'NO ATTACK (baseline)');
-    for m = 1:8
+    for m = 1:length(labels);
         for t = intersect(modeTypes{m}, allowed)
             sched(end+1) = struct('mode', m, 'type', t, ...
                 'label', sprintf('%s（type=%d %s）', labels{m}, t, typeName{t})); %#ok<AGROW>
