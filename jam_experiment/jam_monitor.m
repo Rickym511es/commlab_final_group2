@@ -101,7 +101,8 @@ fprintf('Frame 長度 = %d samples，每 frame 資料量 = %d bits\n', ...
 % Mode 2 (STS 粗 CFO) 沒有 noise 變體 — 純雜訊只是「STS 雜訊」，跟 mode 1 重複。
 % 這份 modeTypes 必須與 jam_tx.m 的 make_schedule 內完全一致。
 attackNames = {'TODO2 STS時間同步','TODO3 STS粗CFO','TODO4 LTS細CFO', ...
-               'TODO5 pilot CFO','TODO6 LTS通道估計','TODO7 CP','TODO8 高功率覆蓋'};
+               'TODO5 pilot CFO','TODO6 LTS通道估計','TODO7 CP','TODO8 高功率覆蓋', ...
+               'TODO9 Broadband Jamming'};
 modeTypes   = {[1 2], [2], [1 2], [1 2], [1 2], [1 2], [1 2]};
 phaseLabels = {'NO ATTACK'};
 phaseModes  = 0;    % 每個階段對應的 attack mode（0 = baseline）；給 pickRxConfig 查

@@ -220,13 +220,14 @@ function sched = make_schedule(cfg)
         'TODO5  pilot CFO 攻擊'; ...
         'TODO6  LTS 通道估計攻擊'; ...
         'TODO7  CP 循環卷積攻擊'; ...
-        'TODO8  高功率資料覆蓋 (flower)'};
+        'TODO8  高功率資料覆蓋 (flower)'; ...
+        'TODO9  Broadband Constant Jamming'};
     typeName = {'noise', 'structured'};
     % 每個 mode 允許的 jam_type；mode 2 (STS 粗 CFO) 沒有 noise 變體。
     modeTypes = {[1 2], [2], [1 2], [1 2], [1 2], [1 2], [1 2]};
     if cfg.runBothTypes, allowed = [1 2]; else, allowed = cfg.jamType; end
     sched = struct('mode', 0, 'type', 0, 'label', 'NO ATTACK (baseline)');
-    for m = 1:7
+    for m = 1:8
         for t = intersect(modeTypes{m}, allowed)
             sched(end+1) = struct('mode', m, 'type', t, ...
                 'label', sprintf('%s（type=%d %s）', labels{m}, t, typeName{t})); %#ok<AGROW>
@@ -402,6 +403,20 @@ function jammer = build_jammer(attack_mode, jam_type, tx_signal, info, fs, knob)
             end
             fake_data = fake_data / rms(fake_data);
             jammer(idx) = jam_power_scale * tx_rms * fake_data;
+        end
+    end
+
+    % (8) TODO8_plus : Constant / Broadband Jamming (全頻段雜訊)
+    if attack_mode == 8
+        % 根據 jam_type 決定是否用雜訊或結構化（這裡統一用雜訊）
+        if jam_type == 1
+            % 寬頻雜訊：整個 frame 加上高斯雜訊
+            idx = 1:N;
+            jammer(idx) = knob.broadband_power * tx_rms * (randn(N,1) + 1j*randn(N,1)) / sqrt(2);
+        else
+            % 結構化模式：同樣使用寬頻雜訊（可視為 constant jamming 的一種），也可保持全頻但更強
+            idx = 1:N;
+            jammer(idx) = knob.broadband_power * 2 * tx_rms * (randn(N,1) + 1j*randn(N,1)) / sqrt(2);
         end
     end
 
