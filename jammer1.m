@@ -27,6 +27,75 @@ qam_num          = 16;
 [tx_signal, info] = gen_80211ag_frame(num_ofdm_symbols, qam_num);
 %%% GONMAN %%%
 
+%%% ===== ECC-protected TX frame (TX-side prototype) ===== %%%
+% Goal:
+%   Give the receiver a CHEAP, RELIABLE way to decide "drop this packet?"
+%   under jamming. No FEC for now -- this is pure error detection.
+%
+% ECC scheme:
+%   CRC-16-CCITT-FALSE
+%     poly = x^16 + x^12 + x^5 + 1   (0x1021)
+%     init = 0xFFFF, no input/output reflection, no xorOut.
+%   Detection probability ~ 1 - 2^-16 ~ 99.998 percent for random errors.
+%   Overhead = 16 bits per frame.
+%
+% Where it sits in the frame:
+%   Outer layout is identical to gen_80211ag_frame:
+%       [ pad | STS | LTS | OFDM data | pad ]
+%   The CRC lives INSIDE the OFDM data region, NOT alongside STS/LTS. The
+%   bit stream fed into QAM modulation is laid out as:
+%       [ data_bits (D) | CRC_bits (16) ]
+%       D = num_ofdm_symbols * 48 * log2(qam_num) - 16
+%         = num_ofdm_symbols * 192 - 16    (for 16-QAM)
+%   With num_ofdm_symbols = 10 and qam_num = 16, that's D = 1904 data bits
+%   + 16 CRC bits = 1920 bits total, which fills exactly 10 OFDM symbols
+%   x 48 data subcarriers x 4 bits/QAM. The 16 CRC bits land on the LAST 16
+%   QAM bits, i.e. the trailing data subcarriers of the LAST OFDM symbol.
+%   RX (when updated) will: QAM-demap -> take last 16 bits as received CRC
+%   -> compute_crc16(everything before) -> compare -> drop if mismatch.
+%
+% When errors occur (i.e. when CRC is expected to fail):
+%   - AWGN above the QAM symbol margin: random bit flips in any subcarrier.
+%   - Jam type 1 (noise): mass random flips wherever the jammer hits.
+%   - Jam type 2 (structured):
+%       * STS time-sync attack -> wrong frame_start -> ~50% bits look like noise.
+%       * STS coarse-CFO attack -> wrong CFO estimate -> phase rotation
+%         across data symbols -> mass bit flips.
+%       * LTS fine-CFO attack -> residual CFO drift -> bit flips across all symbols.
+%       * LTS channel-est attack -> H wrong on alternating subcarriers ->
+%         half of every symbol's bits flipped.
+%       * pilot CFO attack -> per-symbol phase correction absorbs a fake drift
+%         -> bit flips proportional to drift.
+%       * CP attack -> circular-convolution break under multipath -> ISI -> bit flips.
+%       * High-power data overlay (flower) -> direct symbol replacement -> bit flips.
+%   Under ANY of the above, all-bits-correct is overwhelmingly unlikely, so
+%   the 16-bit CRC will catch it and the packet should be dropped.
+%
+% State of this block:
+%   TX-side prototype ONLY. The receiver in jammer1.m's companion script does
+%   not yet verify the CRC -- that's the next step. Toggle useEcc = true to
+%   put the CRC frame on the air; leave false to keep the baseline tx_signal.
+
+useEcc = false;     % true: transmit the CRC frame instead of the baseline.
+                    %       (RX has no CRC verification yet, so any BER
+                    %       computed against a known-payload reference will
+                    %       look wrong until RX is updated.)
+
+[tx_signal_ecc, ecc_data_bits, ecc_crc_bits] = ...
+    gen_80211ag_frame_with_crc(num_ofdm_symbols, qam_num);
+ecc_crc_hex = sum(double(ecc_crc_bits(:).') .* (2.^(15:-1:0)));
+fprintf(['ECC frame ready: %d data bits + 16 CRC bits (CRC-16-CCITT) ' ...
+         '= %d payload bits, CRC = 0x%04X\n'], ...
+        length(ecc_data_bits), length(ecc_data_bits) + 16, ecc_crc_hex);
+
+if useEcc
+    tx_signal = tx_signal_ecc;
+    fprintf('  >>> CRC frame is on air (RX BER vs. known payload will be off).\n');
+else
+    fprintf('  >>> CRC frame is TX-side preview only; baseline still on air.\n');
+end
+%%% GONMAN %%%
+
 %%% jammer signal %%%
 % assume channel 2 for jammer
 %%% pick attack mode, jam type, and the matching power knob %%%
@@ -526,5 +595,94 @@ function [ofdm_data, tx_bits, tx_data_syms, pilot_syms] = gen_ofdm_data(num_ofdm
         tx_bits(:, sym_idx)      = data_bits;
         tx_data_syms(:, sym_idx) = data_sym;
         pilot_syms(:, sym_idx)   = pilot_sym;
+    end
+end
+
+function [tx_frame, data_bits, crc_bits] = gen_80211ag_frame_with_crc(num_ofdm_symbols, qam_num)
+% Same outer layout as gen_80211ag_frame, but the OFDM data payload is the
+% bit stream [data_bits | CRC-16-CCITT(data_bits)] mapped to QAM and OFDM.
+    pad_len  = 100;
+    FFT_size = 64;
+    cp_size  = 16;
+
+    sts = gen_sts();  sts = sts / rms(sts);
+    lts = gen_lts();  lts = lts / rms(lts);
+
+    [ofdm_data, data_bits, crc_bits] = ...
+        gen_ofdm_data_with_crc(num_ofdm_symbols, qam_num);
+    ofdm_data = ofdm_data / rms(ofdm_data);
+
+    tx_frame = [
+        zeros(pad_len, 1);
+        sts;
+        lts;
+        ofdm_data;
+        zeros(pad_len, 1)
+    ];
+end
+
+function [ofdm_data, data_bits, crc_bits] = gen_ofdm_data_with_crc(num_ofdm_symbols, qam_num)
+% OFDM data block whose bit stream is [data_bits | CRC-16-CCITT(data_bits)].
+% Pilot subcarriers use the same random-BPSK convention as gen_ofdm_symbol.
+    active_sc = [-26:-1 1:26];
+    pilot_sc  = [-21 -7 7 21];
+    data_sc   = setdiff(active_sc, pilot_sc);
+    FFT_size  = 64;
+    cp_size   = 16;
+
+    bits_per_sym = log2(qam_num);
+    num_data_sc  = length(data_sc);
+    crc_len      = 16;
+
+    total_bits     = num_ofdm_symbols * num_data_sc * bits_per_sym;
+    data_bit_count = total_bits - crc_len;
+    if data_bit_count < 1
+        error('Payload too small: need at least %d bits to hold CRC.', crc_len + 1);
+    end
+
+    data_bits = randi([0 1], data_bit_count, 1);
+    crc_bits  = compute_crc16(data_bits);
+    all_bits  = [data_bits; crc_bits];                  % length = total_bits
+
+    bits_per_ofdm = num_data_sc * bits_per_sym;
+    bits_matrix   = reshape(all_bits, bits_per_ofdm, num_ofdm_symbols);
+    sc2idx = @(k) k + FFT_size/2 + 1;
+
+    ofdm_data = zeros((FFT_size + cp_size) * num_ofdm_symbols, 1);
+    for s = 1:num_ofdm_symbols
+        data_sym  = qammod(bits_matrix(:, s), qam_num, ...
+                           'InputType', 'bit', 'UnitAveragePower', true);
+        pilot_sym = 2 * randi([0 1], length(pilot_sc), 1) - 1;
+
+        Xc = zeros(FFT_size, 1);
+        Xc(sc2idx(pilot_sc)) = pilot_sym;
+        Xc(sc2idx(data_sc))  = data_sym;
+        a = ifft(ifftshift(Xc));
+        x_cp = [a(end-cp_size+1:end); a];
+
+        s_idx = (s-1)*(FFT_size+cp_size) + 1;
+        ofdm_data(s_idx : s_idx + FFT_size + cp_size - 1) = x_cp;
+    end
+end
+
+function crc_bits = compute_crc16(bits)
+% CRC-16-CCITT-FALSE.
+%   poly = x^16 + x^12 + x^5 + 1 (0x1021)
+%   init = 0xFFFF, MSB-first, no reflection on input or output, no xorOut.
+% Bit-by-bit shift register; uint32 internally so left-shift never overflows.
+    bits   = uint8(bits(:));
+    crc    = uint32(hex2dec('FFFF'));
+    poly   = uint32(hex2dec('1021'));
+    mask16 = uint32(hex2dec('FFFF'));
+    for i = 1:length(bits)
+        topBit = bitand(bitshift(crc, -15), uint32(1));
+        crc    = bitand(bitshift(crc, 1), mask16);
+        if bitxor(topBit, uint32(bits(i)))
+            crc = bitxor(crc, poly);
+        end
+    end
+    crc_bits = zeros(16, 1);
+    for k = 1:16
+        crc_bits(k) = double(bitand(bitshift(crc, -(16 - k)), uint32(1)));
     end
 end

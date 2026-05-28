@@ -19,36 +19,54 @@
 
 clear; clc; close all;
 
-%% ===== 使用者參數 ===================================================
-cfg.serialNum       = '34D9DC3';     % B210 (USRP-2901) 的 SerialNum
+%% =====================================================================
+%% ===========  EXPERIMENT KNOBS — change these per experiment  ========
+%% =====================================================================
+%  以下是「不同實驗條件下會調整」的參數，集中放在一起方便掃描。
+%  RF 硬體設定與 frame spec 在下面兩個區塊，平常不要動。
+%
+%  排程對齊：cfg.secondsPerPhase 必須跟 jam_monitor.m 同步。
+
+% --- (A) 排程 -------------------------------------------------------
+cfg.secondsPerPhase = 20;        % 每階段持續秒數（與 jam_monitor 一致）
+cfg.runBothTypes    = true;      % true  : 每個 mode 跑 noise+structured 兩段（15 段）
+                                 % false : 每個 mode 只跑 cfg.jamType 一段（8 段）
+cfg.jamType         = 2;         % runBothTypes=false 才用：1=純雜訊, 2=結構化
+
+% --- (B) 干擾強度（whole-frame RMS / 真實訊號 RMS 倍數）------------
+%   調這兩個旋鈕掃 jammer 能量對連結的影響：1.0=同強度, 2.0=兩倍, 0.5=半。
+knob.noise_power     = 1;        % jam_type=1（純雜訊）用
+knob.jam_power_scale = 1;        % jam_type=2（結構化）用
+
+% --- (C) 各攻擊細部參數（jam_type=2 結構化才用）--------------------
+knob.sts_fake_shift  = 64;       % mode1: 假 STS 的 sample 偏移
+knob.coarse_cfo_hz   = 80e3;     % mode2: 注在 STS 的假 CFO（>fine 範圍才打得進去）
+knob.fine_cfo_hz     = 120e3;    % mode3: 注在 LTS copy1 的假 CFO
+knob.pilot_cfo_hz    = 60e3;     % mode4: 注在 data 的假 CFO
+knob.flower_petals   = 6;        % mode7: flower 星座花瓣數
+
+% --- (D) RF 前端增益 -----------------------------------------------
+cfg.gain = 15;                   % 兩通道共用：太弱調高、爆掉調低
+
+%% =====================================================================
+%% ===========  Hardware / display (rarely change)  ====================
+%% =====================================================================
+cfg.serialNum       = '34D9DC3';   % B210 (USRP-2901) 的 SerialNum
 cfg.fc              = 885e6;
 cfg.fs              = 1e6;
-cfg.gain            = 15;            % 兩通道共用；太弱調高、爆掉調低
 cfg.masterClockRate = 20e6;
-cfg.secondsPerPhase = 20;            % 每個階段持續秒數
-cfg.runBothTypes    = true;          % true: 每種攻擊兩型(noise+structured)各跑一段
-cfg.jamType         = 2;             % runBothTypes=false 時才用：1=純雜訊, 2=結構化
 cfg.liveTxDisplay   = true;
 cfg.displayEvery    = 20;
 
-%% ===== 干擾強度旋鈕（whole-frame RMS 相對於真實訊號 RMS 的倍數）====
-% 用這兩個旋鈕掃不同 jammer 能量對連結的影響。
-knob.noise_power     = 1;            % jam_type=1 用
-knob.jam_power_scale = 1;            % jam_type=2 用
-% jam_type=2 結構化模式的細部可調參數（對應 jammer1.m）
-knob.sts_fake_shift  = 64;           % mode1: 假 STS 的 sample 偏移
-knob.coarse_cfo_hz   = 80e3;         % mode2: 注在 STS 的假 CFO
-knob.fine_cfo_hz     = 120e3;        % mode3: 注在 LTS 的假 CFO
-knob.pilot_cfo_hz    = 60e3;         % mode4: 注在 data 的假 CFO
-knob.flower_petals   = 6;            % mode7: flower 星座花瓣數
-
-%% ===== Frame 規格（必須與 jam_monitor.m 完全一致）=================
+%% =====================================================================
+%% ===========  Frame spec (must match jam_monitor.m exactly)  =========
+%% =====================================================================
 spec.FFT_size  = 64;
 spec.cp_size   = 16;
 spec.qam_num   = 16;
 spec.num_ofdm  = 20;
 spec.pad_len   = 200;
-spec.seed      = 12345;              % 固定種子：與 monitor 相同才能算 BER
+spec.seed      = 12345;            % 固定種子：與 monitor 相同才能算 BER
 
 %% ===== 組真實 frame（ch1）==========================================
 sts = gen_sts();
@@ -190,9 +208,11 @@ function info = frame_info(spec, sts_len, lts_len)
 end
 
 function sched = make_schedule(cfg)
-% 階段排程：第 1 段不攻擊；之後對每個 attack_mode 1..7 依序排入要跑的 jam_type。
-% runBothTypes=true -> 每個 mode 先 type1(noise) 再 type2(structured)，共 15 段。
-% runBothTypes=false-> 每個 mode 只跑 cfg.jamType，共 8 段。
+% 階段排程：第 1 段不攻擊；之後依序排入每個 attack_mode 各自允許的 jam_type。
+%   runBothTypes=true  -> 每個 mode 各允許的 type 都跑（mode 2 只跑 1 段，其餘 2 段；共 14 段）。
+%   runBothTypes=false -> 每個 mode 只跑 cfg.jamType（mode 2 在 jamType=1 時會被跳過）。
+% 注意：modeTypes 必須與 jam_monitor.m 內 phaseLabels 構造時用的 modeTypes 完全一致，
+% 否則 RX 的階段對齊與 pickRxConfig 會配錯。
     labels = { ...
         'TODO2  STS 時間同步攻擊'; ...
         'TODO3  STS 粗 CFO 攻擊'; ...
@@ -202,10 +222,12 @@ function sched = make_schedule(cfg)
         'TODO7  CP 循環卷積攻擊'; ...
         'TODO8  高功率資料覆蓋 (flower)'};
     typeName = {'noise', 'structured'};
-    if cfg.runBothTypes, types = [1 2]; else, types = cfg.jamType; end
+    % 每個 mode 允許的 jam_type；mode 2 (STS 粗 CFO) 沒有 noise 變體。
+    modeTypes = {[1 2], [2], [1 2], [1 2], [1 2], [1 2], [1 2]};
+    if cfg.runBothTypes, allowed = [1 2]; else, allowed = cfg.jamType; end
     sched = struct('mode', 0, 'type', 0, 'label', 'NO ATTACK (baseline)');
     for m = 1:7
-        for t = types
+        for t = intersect(modeTypes{m}, allowed)
             sched(end+1) = struct('mode', m, 'type', t, ...
                 'label', sprintf('%s（type=%d %s）', labels{m}, t, typeName{t})); %#ok<AGROW>
         end
@@ -248,28 +270,35 @@ function jammer = build_jammer(attack_mode, jam_type, tx_signal, info, fs, knob)
         end
     end
 
-    % (2) TODO3 : 攻擊 STS（粗 CFO）
+    % (2) TODO3 : 攻擊 STS（粗 CFO）—— 只有結構化注入，沒有純雜訊變體。
+    %     原因：純雜訊蓋 STS 只是「STS 雜訊」，效果跟 mode 1 (時間同步攻擊)
+    %     的 noise 變體重複；真正屬於「粗 CFO 攻擊」的是注入一份帶刻意 CFO
+    %     的假 STS，讓 RX 的 sum(conj(s_n).*s_{n+16}) 折進這個假相位差。
+    %     對應 make_schedule 中 modeTypes{2} = [2]，type 1 不會被排程到。
     if attack_mode == 2
         idx = info.sts_start : info.sts_end;
-        if jam_type == 1
-            jammer(idx) = noise_power * tx_rms * noise(numel(idx));
-        else
-            sts = gen_sts(); sts = sts / rms(sts);
-            n_sts = (0:length(sts)-1).';
-            sts_attack = sts .* exp(1j*2*pi*coarse_cfo_hz*n_sts/fs);
-            jammer(idx) = jam_power_scale * tx_rms * sts_attack;
-        end
+        sts = gen_sts(); sts = sts / rms(sts);
+        n_sts = (0:length(sts)-1).';
+        sts_attack = sts .* exp(1j*2*pi*coarse_cfo_hz*n_sts/fs);
+        jammer(idx) = jam_power_scale * tx_rms * sts_attack;
     end
 
-    % (3) TODO4 : 攻擊 LTS（細 CFO）
+    % (3) TODO4 : 攻擊 LTS（細 CFO）—— 只打 copy1，留 copy2 給 RX 估通道
+    %     這樣才能孤立 fine CFO 的影響：通道估計可以用乾淨那份，
+    %     fine CFO 由 conj(copy1) .* copy2 估出來就是被注入的相位差。
     if attack_mode == 3
-        idx = info.lts_start : info.lts_end;
+        % LTS 結構：[CP 32 | copy1 64 | copy2 64]，攻擊 copy1 對應的 64 samples
+        copy1_start = info.lts_start + 32;
+        copy1_end   = copy1_start + info.FFT_size - 1;
+        idx = copy1_start : copy1_end;
         if jam_type == 1
             jammer(idx) = noise_power * tx_rms * noise(numel(idx));
         else
-            lts = gen_lts(); lts = lts / rms(lts);
-            n_lts = (0:length(lts)-1).';
-            lts_attack = lts .* exp(1j*2*pi*fine_cfo_hz*n_lts/fs);
+            lts_full = gen_lts();
+            lts_body = lts_full(33:96);             % 純 64-sample LTS body
+            lts_body = lts_body / rms(lts_body);
+            n_lts = (0:length(lts_body)-1).';
+            lts_attack = lts_body .* exp(1j*2*pi*fine_cfo_hz*n_lts/fs);
             jammer(idx) = jam_power_scale * tx_rms * lts_attack;
         end
     end
