@@ -71,7 +71,8 @@ OFDM_Jammer_Project/
 ## 攻擊模式列表
 參照論文 *Jamming Attacks and Anti-Jamming Strategies in Wireless Networks*，目前已實作的攻擊模式：
 
-**結構化攻擊（針對 OFDM 同步／估計鏈路特定環節）：**
+**A.結構化攻擊（針對 OFDM 同步／估計鏈路特定環節）：**
+
 1.  **NO ATTACK:** 基線傳輸。
 2.  **STS 時間同步攻擊 (TODO2):** 錯置封包起點。
 3.  **STS 粗頻偏 (CFO) 攻擊 (TODO3):** 注入虛假 coarse CFO。
@@ -81,7 +82,8 @@ OFDM_Jammer_Project/
 7.  **CP 循環卷積攻擊 (TODO7):** 寫入錯誤 CP 引發符號間干擾 (ISI)。
 8.  **高功率資料覆蓋 / Flower 攻擊 (TODO8):** 於 data 子載波打出花瓣狀星座干擾。
 
-**寬頻 / 限頻 / CW 攻擊（不依賴 OFDM 內部結構，泛用型干擾）：**
+**B.寬頻 / 限頻 / CW 攻擊（不依賴 OFDM 內部結構，泛用型干擾）：**
+
 9.  **Broadband Constant Jamming (TODO9):** 整個 frame 全頻段複數高斯雜訊。
 10. **限頻 AWGN (TODO9-2):** 只在 ±BW/2 範圍內注入雜訊，可 sweep 多種 `awgn_bw_ratio` 比較窄頻 vs. 寬頻效果。
 11. **單頻 CW (TODO10):** 單一頻偏的連續波干擾。
