@@ -29,8 +29,8 @@ clear; clc; close all;
 
 % --- (A) 排程 -------------------------------------------------------
 cfg.secondsPerPhase = 20;        % 每階段持續秒數（與 jam_monitor 一致）
-cfg.runBothTypes    = true;      % true  : 每個 mode 跑 noise+structured 兩段（15 段）
-                                 % false : 每個 mode 只跑 cfg.jamType 一段（8 段）
+cfg.runBothTypes    = true;      % true  : 每個 mode 跑各自允許的 jam_type（含 mode 9 的 BW sweep，共約 22 段）
+                                 % false : 每個 mode 只跑 cfg.jamType（jamType=2 約 15 段、jamType=1 約 8 段）
 cfg.jamType         = 2;         % runBothTypes=false 才用：1=純雜訊, 2=結構化
 
 % --- (B) 干擾強度（whole-frame RMS / 真實訊號 RMS 倍數）------------
@@ -47,6 +47,14 @@ knob.flower_petals   = 6;        % mode7: flower 星座花瓣數
 
 % --- (D) RF 前端增益 -----------------------------------------------
 cfg.gain = 15;                   % 兩通道共用：太弱調高、爆掉調低
+
+% --- (E) 任務一：新增的 Jammer 參數 ---------------------------------
+knob.awgn_bw_ratio    = [0.2, 0.5, 1.0];   % mode 9 會逐一掃這幾個頻寬比例（schedule 自動為每個值排一段）
+knob.single_tone_freq = 100e3;             % 單頻訊號頻率偏移 (Hz)
+knob.multi_tone_freqs = [50e3, 120e3, 200e3]; % 多個單頻訊號頻率
+knob.multi_tone_amps  = [1.0, 0.8, 0.6];   % 對應振幅
+% 注意：mode 8 (broadband) 的能量由末段 RMS normalize 控制（用 noise_power / jam_power_scale），
+%       不需要另一個 broadband_power 旋鈕。
 
 %% =====================================================================
 %% ===========  Hardware / display (rarely change)  ====================
@@ -90,7 +98,7 @@ catch
 end
 
 %% ===== 排程 =========================================================
-sched = make_schedule(cfg);
+sched = make_schedule(cfg, knob);
 numPhases = numel(sched);
 totalSec  = numPhases * cfg.secondsPerPhase;
 fprintf('\n排程共 %d 個階段，每階段 %d 秒，總長 %d 秒：\n', ...
@@ -145,7 +153,7 @@ while toc(t0) < totalSec
     if p ~= curPhase
         curPhase = p;
         s = sched(p);
-        jammer = build_jammer(s.mode, s.type, real_frame, info, cfg.fs, knob);
+        jammer = build_jammer(s.mode, s.type, s.bw_idx, real_frame, info, cfg.fs, knob);
         % 兩條 DAC 各自獨立 clip：真實通道固定不動，只在 jammer 峰值超過上限時縮 jammer。
         jpk = max(abs(jammer));
         if jpk > 0.95
@@ -207,12 +215,12 @@ function info = frame_info(spec, sts_len, lts_len)
     info.cp_starts        = info.data_start + (0:ns-1)*sym;
 end
 
-function sched = make_schedule(cfg)
+function sched = make_schedule(cfg, knob)
 % 階段排程：第 1 段不攻擊；之後依序排入每個 attack_mode 各自允許的 jam_type。
-%   runBothTypes=true  -> 每個 mode 各允許的 type 都跑（mode 2 只跑 1 段，其餘 2 段；共 14 段）。
+%   runBothTypes=true  -> 每個 mode 各允許的 type 都跑（mode 2 只跑 1 段，其餘 2 段）。
 %   runBothTypes=false -> 每個 mode 只跑 cfg.jamType（mode 2 在 jamType=1 時會被跳過）。
-% 注意：modeTypes 必須與 jam_monitor.m 內 phaseLabels 構造時用的 modeTypes 完全一致，
-% 否則 RX 的階段對齊與 pickRxConfig 會配錯。
+% 注意：modeTypes / modeBwIdxs 必須與 jam_monitor.m 內 phaseLabels 構造時用的兩個陣列
+% 完全一致，否則 RX 的階段對齊與 pickRxConfig 會配錯。
     labels = { ...
         'TODO2  STS 時間同步攻擊'; ...
         'TODO3  STS 粗 CFO 攻擊'; ...
@@ -221,24 +229,43 @@ function sched = make_schedule(cfg)
         'TODO6  LTS 通道估計攻擊'; ...
         'TODO7  CP 循環卷積攻擊'; ...
         'TODO8  高功率資料覆蓋 (flower)'; ...
-        'TODO9  Broadband Constant Jamming'};
+        'TODO9  Broadband Constant Jamming'; ...
+        'TODO9-2  限頻AWGN'; ...
+        'TODO10 單頻CW'; ...
+        'TODO11 多頻CW'; ...
+        'TODO12 假Frame覆蓋'};
     typeName = {'noise', 'structured'};
     % 每個 mode 允許的 jam_type；mode 2 (STS 粗 CFO) 沒有 noise 變體。
-    modeTypes = {[1 2], [2], [1 2], [1 2], [1 2], [1 2], [1 2], [1 2]};
+    modeTypes = {[1 2], [2], [1 2], [1 2], [1 2], [1 2], [1 2], [1 2], [2], [2], [2], [2]};
+    % 每個 mode 要 sweep 的 bw_idx（指向 knob.awgn_bw_ratio）。空 cell = 不做 BW sweep，
+    % 該 mode 只排 1 段（bw_idx=0）。目前只有 mode 9 (限頻 AWGN) 需要 sweep。
+    modeBwIdxs = cell(1, length(labels));
+    modeBwIdxs{9} = 1:length(knob.awgn_bw_ratio);
     if cfg.runBothTypes, allowed = [1 2]; else, allowed = cfg.jamType; end
-    sched = struct('mode', 0, 'type', 0, 'label', 'NO ATTACK (baseline)');
-    for m = 1:length(labels);
+    sched = struct('mode', 0, 'type', 0, 'bw_idx', 0, 'label', 'NO ATTACK (baseline)');
+    for m = 1:length(labels)
+        bwList = modeBwIdxs{m};
+        if isempty(bwList), bwList = 0; end
         for t = intersect(modeTypes{m}, allowed)
-            sched(end+1) = struct('mode', m, 'type', t, ...
-                'label', sprintf('%s（type=%d %s）', labels{m}, t, typeName{t})); %#ok<AGROW>
+            for bw = bwList
+                if bw > 0
+                    lab = sprintf('%s（type=%d %s, bw=%.2f）', ...
+                        labels{m}, t, typeName{t}, knob.awgn_bw_ratio(bw));
+                else
+                    lab = sprintf('%s（type=%d %s）', labels{m}, t, typeName{t});
+                end
+                sched(end+1) = struct('mode', m, 'type', t, ...
+                    'bw_idx', bw, 'label', lab); %#ok<AGROW>
+            end
         end
     end
 end
 
-function jammer = build_jammer(attack_mode, jam_type, tx_signal, info, fs, knob)
+function jammer = build_jammer(attack_mode, jam_type, bw_idx, tx_signal, info, fs, knob)
 % 依攻擊模式產生與 tx_signal 等長、逐 sample 對齊的 jammer。
 % 干擾功率以 victim RMS 的倍數設定（knob.noise_power / jam_power_scale），
 % 方便掃不同 jammer 能量對連結的影響。attack_mode = 0 -> baseline，回傳全零。
+% bw_idx 只在 attack_mode = 9 用到，指向 knob.awgn_bw_ratio 的索引；其他 mode 忽略。
 % 攻擊邏輯與 jammer1.m 一致。
     N = length(tx_signal);
     jammer = zeros(N, 1);
@@ -406,18 +433,64 @@ function jammer = build_jammer(attack_mode, jam_type, tx_signal, info, fs, knob)
         end
     end
 
-    % (8) TODO8_plus : Constant / Broadband Jamming (全頻段雜訊)
+    % (8) TODO8_plus : Constant / Broadband Jamming (全頻段複數雜訊)
+    %     強度由末段 RMS normalize 統一控制 (noise_power / jam_power_scale)；
+    %     type 1 / type 2 差別只在於套哪個旋鈕。
     if attack_mode == 8
-        % 根據 jam_type 決定是否用雜訊或結構化（這裡統一用雜訊）
-        if jam_type == 1
-            % 寬頻雜訊：整個 frame 加上高斯雜訊
-            idx = 1:N;
-            jammer(idx) = knob.broadband_power * tx_rms * (randn(N,1) + 1j*randn(N,1)) / sqrt(2);
+        jammer = (randn(N,1) + 1j*randn(N,1)) / sqrt(2);
+    end
+        
+    % (9) mode 9 : 限頻 AWGN（在 ±BW/2 範圍內注入複數雜訊）
+    %     直接在 N 點頻域上開零，避開原本 256 點 ifft + repmat 造成的週期性 artifact
+    %     與 bw_ratio=0.5/1.0 時的維度／越界 bug。bw_idx 由 schedule sweep 指定。
+    if attack_mode == 9
+        if bw_idx >= 1 && bw_idx <= length(knob.awgn_bw_ratio)
+            bw_ratio = knob.awgn_bw_ratio(bw_idx);
         else
-            % 結構化模式：同樣使用寬頻雜訊（可視為 constant jamming 的一種），也可保持全頻但更強
-            idx = 1:N;
-            jammer(idx) = knob.broadband_power * 2 * tx_rms * (randn(N,1) + 1j*randn(N,1)) / sqrt(2);
+            bw_ratio = knob.awgn_bw_ratio(1);   % 預設 fallback
         end
+        bw_bins  = max(1, round(N * bw_ratio));
+        center   = floor(N/2) + 1;
+        bin_lo   = max(1, center - floor(bw_bins/2));
+        bin_hi   = min(N, bin_lo + bw_bins - 1);
+        bins     = bin_lo:bin_hi;
+        noise_fd = zeros(N, 1);
+        noise_fd(bins) = (randn(numel(bins),1) + 1j*randn(numel(bins),1)) / sqrt(2);
+        noise_td = ifft(ifftshift(noise_fd));   % 保留複數
+        jammer   = jam_power_scale * tx_rms * noise_td;
+    end
+
+    % (10) mode 10 : 單頻連續波 (CW)
+    if attack_mode == 10
+        t = (0:N-1)' / fs;
+        single_tone = exp(1j*2*pi*knob.single_tone_freq * t);
+        jammer = jam_power_scale * tx_rms * single_tone;
+    end
+
+    % (11) mode 11 : 多個單頻訊號
+    if attack_mode == 11
+        t = (0:N-1)' / fs;
+        multi_tone = zeros(N, 1);
+        for k = 1:length(knob.multi_tone_freqs)
+            multi_tone = multi_tone + ...
+                knob.multi_tone_amps(k) * exp(1j*2*pi*knob.multi_tone_freqs(k)*t);
+        end
+        multi_tone = multi_tone / rms(multi_tone);
+        jammer = jam_power_scale * tx_rms * multi_tone;
+    end
+
+    % (12) mode 12 : 完整 frame 覆蓋 (自訂 data)
+    if attack_mode == 12
+        % build_jammer 看不到 script 的 spec，pad_len/num_ofdm/qam 從 info 反推。
+        pad_len = info.sts_start - 1;
+        fake_sts = gen_sts();
+        fake_lts = gen_lts();
+        prev_state = rng; rng(999);                       % 固定 fake data，但不污染外部 RNG
+        [fake_ofdm, ~, ~, ~] = gen_ofdm_data(info.num_ofdm_symbols, info.qam_num);
+        rng(prev_state);
+        fake_frame = [zeros(pad_len,1); fake_sts; fake_lts; fake_ofdm; zeros(pad_len,1)];
+        fake_frame = jam_power_scale * tx_rms * fake_frame / rms(fake_frame);
+        jammer = fake_frame;
     end
 
     % whole-frame RMS 正規化：讓 rms(jammer)/rms(tx_signal) == 旋鈕值
