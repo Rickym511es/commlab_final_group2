@@ -7,6 +7,51 @@
 
 主要實驗碼已重構為參數驅動的 `OFDM_Jammer_Project/`；舊版 `jam_experiment/` 保留作為回歸對照，等硬體 parity 驗證後再退役。
 
+```
+OFDM_Jammer_Project/
+├── tx_console.m                  ENTRY (B210): default = full sweep;
+│                                              tx_console(mode, power) pins one attack
+├── rx_console.m                  ENTRY (N210): default = full sweep;
+│                                              rx_console(mode) locks RX strategy
+├── selftest.m                    digital loopback parity check (no hardware)
+│
+├── config/
+│   └── load_parameters.m         single source of truth: spec / tx / rx
+│                                 / sched / detect / knob
+│
+├── core/                         TX/RX shared low-level
+│   ├── gen_sts.m / gen_lts.m
+│   ├── gen_ofdm_symbol.m / gen_ofdm_data.m
+│   ├── build_frame.m / frame_info.m
+│   ├── process_capture.m         RX: detect → CFO → H → demod → BER/SNR
+│   ├── detect_sts_mf.m / detect_sts_autocorr.m
+│   ├── estimate_channel.m / ofdm_demod_symbol.m / equalize_symbol.m
+│   ├── init_usrp_tx.m / init_usrp_rx.m
+│   ├── compute_crc16.m           real CRC-16-CCITT
+│   ├── normalize_jammer.m / default_rxcfg.m / feed_jam_const.m
+│   └── make_dashboard.m / update_dashboard.m
+│
+├── modes/                        one file per attack: TX build + RX rxcfg
+│   ├── mode00_baseline.m
+│   ├── mode01_sts_sync.m         (TODO2 STS timing sync)
+│   ├── mode02_coarse_cfo.m       (TODO3 STS coarse CFO, structured only)
+│   ├── mode03_fine_cfo.m         (TODO4 LTS fine CFO)
+│   ├── mode04_pilot_cfo.m        (TODO5 pilot CFO)
+│   ├── mode05_chan_est.m         (TODO6 LTS channel estimation)
+│   ├── mode06_cp.m               (TODO7 CP circular convolution)
+│   ├── mode07_flower.m           (TODO8 high-power data overlay)
+│   ├── mode08_broadband.m        (TODO9 broadband constant)
+│   ├── mode09_bandlimited_awgn.m (TODO9-2 band-limited AWGN; BW sweep)
+│   ├── mode10_single_cw.m        (TODO10 single CW)
+│   ├── mode11_multi_cw.m         (TODO11 multi CW)
+│   ├── mode12_fake_frame.m       (TODO12 fake frame overlay)
+│   └── mode_registry.m           expands (mode × type × sweep) → schedule
+│
+└── scripts/
+    ├── run_tx_loop.m             TX while-loop body
+    └── run_rx_loop.m             RX while-loop body
+```
+
 * **OFDM_Jammer_Project/** — 重構後的主架構（建議從這裡跑實驗）
     * `tx_console.m`: B210 發射端入口。`tx_console()` 跑完整 22 階段 sweep；`tx_console(mode, power)` 鎖定單一攻擊與功率。
     * `rx_console.m`: N210 接收端入口；對應 TX 的 mode 切換 RX 解調策略。
