@@ -71,23 +71,24 @@ OFDM_Jammer_Project/
 ## 攻擊模式列表
 參照論文 *Jamming Attacks and Anti-Jamming Strategies in Wireless Networks*；經整理後目前的攻擊清單（共 **17 個排程階段**）：
 
-每個攻擊區分 **type 1 = noise 變體**（在目標區段灌高斯複數雜訊）與 **type 2 = structured 變體**（注入特定 OFDM 物件，例如假 STS / 假 LTS / flower）。下表標示每個 mode 還剩下哪些 type。
+**A.結構化攻擊（針對 OFDM 同步／估計鏈路特定環節）：**
 
-| Mode | 標籤 | type 1 | type 2 | 備註 |
-|---|---|:-:|:-:|---|
-| 0 | NO ATTACK | — | — | baseline，用來校正 RX 的 baselineSNR |
-| 1 | TODO2 STS 時間同步攻擊 | ✓ | ✓ | type 2 為偏移 +64 樣本的假 STS |
-| 2 | TODO3 STS 粗 CFO 攻擊 | — | ✓ | type 2: 真 STS 加 80 kHz CFO |
-| 3 | TODO4 LTS 細 CFO 攻擊 | ✓ | ✓ | 只攻擊 copy1，留 copy2 給 RX 估通道 |
-| 4 | TODO5 pilot 攻擊 | ✓ | — | 在 4 條 pilot 子載波灌雜訊 |
-| 5 | TODO6 LTS 通道估計攻擊 | ✓ | ✓ | type 2: 假 LTS 每隔一條 active subcarrier 反相；RX 端 `equalize_symbol` 改用 MMSE 正則化避免 H≈0 的 bin 除零爆炸 |
-| 6 | TODO7 CP 循環卷積攻擊 | ✓ | ✓ | type 2: CP 換成不相關 OFDM body 開頭 |
-| 7 | TODO8 Flower 覆蓋 | — | ✓ | rose-curve 高功率資料覆蓋（可由 `knob.flower_petals` 調花瓣數）|
-| 8 | TODO9 Broadband 雜訊 | — | ✓ | 全 frame 全頻段 AWGN；強度=外部 `power` 參數 |
-| 9 | TODO9-2 限頻 AWGN | — | ✓ | `bw_ratio` 由 `tx_console(9,power,'bw_ratio',x)` 設定 |
-| 10 | TODO10 單頻 CW | — | ✓ | 頻率由 `'freq', f` 覆寫 |
-| 11 | TODO11 多頻 CW | — | ✓ | 頻率組與振幅由 `'freqs', F, 'amps', A` 覆寫 |
-| 12 | TODO12 假 Frame 覆蓋 | — | ✓ | 獨立 seed 重新產生完整 [pad;STS;LTS;OFDM;pad] |
+1.  **NO ATTACK:** 基線傳輸。
+2.  **STS 時間同步攻擊 (TODO2):** 錯置封包起點。
+3.  **STS 粗頻偏 (CFO) 攻擊 (TODO3):** 注入虛假 coarse CFO。
+4.  **LTS 細頻偏 (CFO) 攻擊 (TODO4):** 只攻擊 LTS copy1，留 copy2 給 RX 估通道，孤立 fine CFO 影響。
+5.  **Pilot CFO 攻擊 (TODO5):** 單獨干擾導護子載波。
+6.  **LTS 通道估計攻擊 (TODO6):** 破壞等化器 $H$ 矩陣估計。
+7.  **CP 循環卷積攻擊 (TODO7):** 寫入錯誤 CP 引發符號間干擾 (ISI)。
+8.  **高功率資料覆蓋 / Flower 攻擊 (TODO8):** 於 data 子載波打出花瓣狀星座干擾。
+
+**B.寬頻 / 限頻 / CW 攻擊（不依賴 OFDM 內部結構，泛用型干擾）：**
+
+9.  **Broadband Constant Jamming (TODO9):** 整個 frame 全頻段複數高斯雜訊。
+10. **限頻 AWGN (TODO9-2):** 只在 ±BW/2 範圍內注入雜訊，可 sweep 多種 `awgn_bw_ratio` 比較窄頻 vs. 寬頻效果。
+11. **單頻 CW (TODO10):** 單一頻偏的連續波干擾。
+12. **多頻 CW (TODO11):** 多個頻率／振幅的連續波組合。
+13. **假 Frame 覆蓋 (TODO12):** 自訂 seed 重新產生 STS+LTS+OFDM data 整段假 frame 對打。
 
 干擾強度由 `tx_console(mode, power, ...)` 的 `power` 參數統一控制：內部會同時設定 `knob.noise_power` 與 `knob.jam_power_scale`，最終以 victim RMS 倍數做 whole-frame 正規化。各 mode 的形狀參數（mode 9 的 `bw_ratio`、mode 10 的 `freq`、mode 11 的 `freqs/amps`）也都可以從 console 用 name-value 一次覆寫，不需動 `load_parameters.m`。
 
