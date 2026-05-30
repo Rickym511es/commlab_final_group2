@@ -105,6 +105,35 @@ OFDM_Jammer_Project/
 
 干擾強度由 `knob.noise_power`（純雜訊變體用）與 `knob.jam_power_scale`（結構化變體用）控制，最終以 victim RMS 倍數做 whole-frame 正規化，方便掃描功率對連結的影響。
 
+## CRC + QPSK 實驗鏈路（新增）
+
+為了讓「frame 是否受損」變成可量測的二值訊號，主鏈路做了兩項改動：
+
+* **QAM 改成 QPSK (`spec.qam_num = 4`)**：constellation 點少且距離大，乾淨環境下 baseline BER ≈ 0。這樣只要有任一 bit 翻轉，CRC 就會抓到，CRC 結果才有資訊量。
+* **每個 frame 末尾附 CRC-16-CCITT**：`gen_ofdm_data` 先生成 `data_bits_per_frame = 1904` 個 user bits，呼叫 `compute_crc16` 算出 16 個 CRC bits，串成 `1920 = num_ofdm × num_data_sc × log2(qam_num)` 的完整 bit stream 再 QAM 調變。`process_capture` 在 demap 後切出最後 16 個 bits、對前段重新算 CRC、輸出 `res.crc_pass`。
+
+CRC 結果在三條路徑都會出現：
+
+* **`selftest.m`**：表格多一欄 `CRC` 顯示 `pass / fail / --`（`--` 代表沒偵測到 frame，無從計算）。
+* **`rx_console`（sweep）**：dashboard 多了「CRC pass (recent)」一列；jammed/link-OK 判定多吃一個門檻 `params.detect.crcPassJam`（預設 0.9）；每 5 秒的 console log 也附 `CRC=<pct>`。
+* **`rx_burst_console`**：每個 bucket 的列同時印 `SNR=… BER=… CRC=<pct>` 與 cumulative；`.mat` log 新增 `crcRate` / `totalCrcPass` / `cumCrcRate` 欄位；`uiCtx.onBucket` 多帶一個 `crcRate` 引數（舊 callback 可忽略）。
+
+預期讀數（直接照 `selftest` 跑出來的結果）：
+
+| 大類 | 例子 | CRC 預期 |
+|---|---|---|
+| Baseline | mode 0 | pass（BER=0、SNR≈120 dB）|
+| 攻擊 preamble 但 RX 有對策 | mode 3 (clean LTS copy)；mode 6 CP（無 multipath 時）| pass |
+| 攻擊 preamble，RX 無法回復 | mode 1 STS noise（detector miss）；mode 2 coarse CFO | fail 或無 detect |
+| 任何打到 data region 的攻擊 | mode 4/5/7/8/9/10/11/12 | fail（含「detected 但 BER >> 0」）|
+
+（在 USRP 實機上 mode 6 預期會因為實際 multipath 而變 fail，這就是與 digital loopback 的差別點。）
+
+### Detector 補強
+
+QPSK 的時域樣本量級比 16-QAM 均勻，導致 `detect_sts_autocorr` 在 frame 結尾的窗緣會出現 `|P|/R` 數值爆衝（窗內幾乎都是 pad zero 配上單一個小幅度 data sample，造成 R→0 但 P 非零）。修法：對 `Rseq` 加 5% 的相對 floor mask，能量太低的窗位直接視為無效。Baseline 偵測分數依舊 1.00，但 trailing-edge 的假峰被壓掉，不會被誤判為 frame。
+
+
 ## Burst-mode 排程實驗（新增，**未在 USRP 上驗證**）
 
 `tx_burst_console` / `rx_burst_console` 與對應的 GUI app（`tx_burst_app` / `rx_burst_app`）是另一條獨立的執行路徑，跟原本的「22 階段 sweep」完全分開。原本的 `tx_console` / `rx_console` / `run_tx_loop` / `run_rx_loop` 不受影響。

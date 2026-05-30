@@ -45,6 +45,8 @@ function run_rx_loop(params, sched, rx)
     calibSNR = []; baselineSNR = NaN;
     WIN = 40;
     recentDet = false(1,WIN); recentSNR = nan(1,WIN); recentBER = nan(1,WIN);
+    recentCrc = false(1,WIN);
+    crcPassTotal = 0;
     ridx = 0; lastLog = -inf; curTight = NaN;
 
     numData   = length(spec.data_sc);
@@ -85,10 +87,13 @@ function run_rx_loop(params, sched, rx)
         recentDet(ridx) = res.detected;
         if res.detected
             recentSNR(ridx) = res.snr_dB;  recentBER(ridx) = res.ber;
+            recentCrc(ridx) = res.crc_pass;
             framesDetected = framesDetected + 1;
+            if res.crc_pass, crcPassTotal = crcPassTotal + 1; end
             goodBits = goodBits + refs.bits_per_frame * max(0, 1 - res.ber);
         else
             recentSNR(ridx) = NaN;  recentBER(ridx) = NaN;
+            recentCrc(ridx) = false;
         end
 
         if elapsed < params.sched.calibSeconds
@@ -127,6 +132,12 @@ function run_rx_loop(params, sched, rx)
             recSNR   = mean(recentSNR, 'omitnan');
             recBER   = mean(recentBER, 'omitnan');
             tputKbps = goodBits / max(elapsed,1e-3) / 1e3;
+            detSlots = recentDet;
+            if any(detSlots)
+                recCrc = mean(recentCrc(detSlots));
+            else
+                recCrc = NaN;
+            end
 
             if elapsed < params.sched.calibSeconds || isnan(baselineSNR)
                 statusTxt = 'CALIBRATING...'; statusCol = [0.85 0.65 0.1];
@@ -137,6 +148,7 @@ function run_rx_loop(params, sched, rx)
                 end
                 if detRate < params.detect.detRateJam, jammed = true; end
                 if ~isnan(recBER) && recBER > params.detect.berJam, jammed = true; end
+                if ~isnan(recCrc) && recCrc < params.detect.crcPassJam, jammed = true; end
                 if jammed
                     statusTxt = 'JAMMING DETECTED'; statusCol = [0.85 0.15 0.15];
                 else
@@ -145,7 +157,7 @@ function run_rx_loop(params, sched, rx)
             end
 
             update_dashboard(dash, statusTxt, statusCol, framesDetected, ...
-                detRate, recBER, recSNR, baselineSNR, tputKbps);
+                detRate, recBER, recSNR, baselineSNR, tputKbps, recCrc);
 
             wantTight = strcmp(statusTxt, 'LINK OK');
             if ~isequal(wantTight, curTight)
@@ -164,10 +176,11 @@ function run_rx_loop(params, sched, rx)
                 if isfield(res,'cfo_hz') && ~isnan(res.cfo_hz), cfoTxt = sprintf('%+6.0f', res.cfo_hz); else, cfoTxt = '   off'; end
                 if isfield(res,'fine_cfo_hz') && ~isnan(res.fine_cfo_hz), fineTxt = sprintf('%+6.0f', res.fine_cfo_hz); else, fineTxt = '   off'; end
                 if isfield(res,'detect_score') && ~isnan(res.detect_score), detScoreTxt = sprintf('%.2f', res.detect_score); else, detScoreTxt = '  -- '; end
+                if isnan(recCrc), crcTxt = ' --'; else, crcTxt = sprintf('%3.0f%%', 100*recCrc); end
                 fprintf(['[%6.1fs] %-16s | phase:%s | rx:%s | det=%3.0f%% ' ...
-                         'score=%s SNR=%5.1fdB BER=%.2e cfo=%sHz fine=%sHz\n'], ...
+                         'score=%s SNR=%5.1fdB BER=%.2e CRC=%s cfo=%sHz fine=%sHz\n'], ...
                     elapsed, statusTxt, pTxt, rxOpt.modeLabel, 100*detRate, ...
-                    detScoreTxt, recSNR, recBER, cfoTxt, fineTxt);
+                    detScoreTxt, recSNR, recBER, crcTxt, cfoTxt, fineTxt);
             end
         end
     end

@@ -25,9 +25,9 @@ function selftest()
 
     sched = mode_registry('schedule', params);
     fprintf('selftest: %d phases\n\n', numel(sched));
-    fprintf('%-3s %-42s %-12s %-9s %-9s %-9s\n', ...
-            'idx', 'phase', 'detected', 'score', 'BER', 'SNRdB');
-    fprintf('%s\n', repmat('-', 1, 90));
+    fprintf('%-3s %-42s %-10s %-7s %-9s %-7s %-4s\n', ...
+            'idx', 'phase', 'detected', 'score', 'BER', 'SNRdB', 'CRC');
+    fprintf('%s\n', repmat('-', 1, 95));
 
     for i = 1:numel(sched)
         s = sched(i);
@@ -52,7 +52,11 @@ function selftest()
         ber = res.ber;   if isnan(ber), berStr = '  --   '; else, berStr = sprintf('%.2e', ber); end
         snr = res.snr_dB; if isnan(snr), snrStr = '  --   '; else, snrStr = sprintf('%6.2f', snr); end
         score = res.detect_score; if isnan(score), scoreStr = '  --'; else, scoreStr = sprintf('%6.2f', score); end
-        fprintf('%-3d %-42s %-12s %-9s %-9s %-9s\n', i, truncate(s.label, 42), det, scoreStr, berStr, snrStr);
+        if ~res.detected, crcStr = ' -- ';
+        elseif res.crc_pass, crcStr = 'pass';
+        else,                crcStr = 'fail'; end
+        fprintf('%-3d %-42s %-10s %-7s %-9s %-7s %-4s\n', ...
+                i, truncate(s.label, 42), det, scoreStr, berStr, snrStr, crcStr);
     end
     fprintf('\nselftest done.\n');
 end

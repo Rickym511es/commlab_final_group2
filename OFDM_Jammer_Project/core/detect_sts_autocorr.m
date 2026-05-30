@@ -15,6 +15,16 @@ function det = detect_sts_autocorr(data, sts_len, pad_len, threshold)
     Pseq = filter(kernel, 1, prodSeq);
     Rseq = filter(kernel, 1, pwrSeq);
     M = abs(Pseq) ./ (Rseq + 1e-12);
+    % Mask out windows whose accumulated signal power is a negligible
+    % fraction of the trace peak. Otherwise edge regions where the
+    % window straddles trailing-pad zeros + a single tiny data sample
+    % can produce |P|/R >> 1 numerical spikes that beat the real STS
+    % peak (~1). 5% of max(R) is well below any real signal segment
+    % but cleanly removes the edge artifact.
+    maxR = max(Rseq);
+    if maxR > 0
+        M(Rseq < 0.05 * maxR) = 0;
+    end
 
     [pkM, peak_idx] = max(M);
     det.score = pkM;

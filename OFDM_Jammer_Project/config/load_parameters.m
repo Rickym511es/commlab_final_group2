@@ -19,11 +19,20 @@ function params = load_parameters()
     spec.active_sc = [-26:-1, 1:26];
     spec.pilot_sc  = [-21 -7 7 21];
     spec.data_sc   = setdiff(spec.active_sc, spec.pilot_sc);
-    spec.qam_num   = 16;
+    % QPSK keeps baseline BER essentially at 0 so CRC pass/fail is a
+    % meaningful binary signal. With 16-QAM the constellation density
+    % was high enough that minor noise flipped bits and CRC dropped
+    % frames purely from receiver noise, which masked attack effects.
+    spec.qam_num   = 4;
     spec.num_ofdm  = 20;
     spec.pad_len   = 200;
     spec.seed      = 12345;
     spec.crc_len   = 16;
+    % Total payload bits per frame:
+    %   num_ofdm * num_data_sc * log2(qam_num)
+    % = 20 * 48 * 2 = 1920 bits with QPSK
+    % Of which the trailing crc_len bits are the CRC, leaving
+    %   spec.data_bits_per_frame = 1920 - 16 = 1904 user bits.
     spec.data_bits_per_frame = spec.num_ofdm * length(spec.data_sc) * ...
                                log2(spec.qam_num) - spec.crc_len;
     params.spec = spec;
@@ -68,6 +77,7 @@ function params = load_parameters()
     detect.snrDropDb         = 3;
     detect.detRateJam        = 0.8;
     detect.berJam            = 1e-2;
+    detect.crcPassJam        = 0.9;   % CRC pass-rate below this -> jammed
     params.detect = detect;
 
     % --- Power knobs + per-attack tunables ---

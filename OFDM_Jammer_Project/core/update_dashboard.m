@@ -1,5 +1,7 @@
-function update_dashboard(dash, statusTxt, statusCol, frames, detRate, ber, snr, baseSNR, tput)
-% update_dashboard  Refresh the status banner and 6 metric strings.
+function update_dashboard(dash, statusTxt, statusCol, frames, detRate, ber, snr, baseSNR, tput, crcRate)
+% update_dashboard  Refresh the status banner and 7 metric strings.
+%   crcRate is optional for backwards compatibility (NaN = '--').
+    if nargin < 10, crcRate = NaN; end
     dash.statusBox.FaceColor = statusCol;
     dash.status.String = statusTxt;
     dash.val(1).String = sprintf('%d', frames);
@@ -11,5 +13,7 @@ function update_dashboard(dash, statusTxt, statusCol, frames, detRate, ber, snr,
     if isnan(baseSNR), dash.val(5).String = '--';
     else,              dash.val(5).String = sprintf('%.1f dB', baseSNR); end
     dash.val(6).String = sprintf('%.1f kbps', tput);
+    if isnan(crcRate), dash.val(7).String = '--';
+    else,              dash.val(7).String = sprintf('%.0f %%', 100*crcRate); end
     drawnow limitrate;
 end

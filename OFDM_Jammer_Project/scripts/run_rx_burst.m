@@ -48,14 +48,16 @@ function run_rx_burst(params, burst, phase, rx, uiCtx)
     rxOpt = phase.descriptor.rxcfg(default_rxcfg(params), params);
 
     % --- per-burst accumulators ---
-    burstIdx       = 0;
-    burstFrames    = 0;
-    burstSNRSum    = 0;
-    burstBERSum    = 0;
-    burstStartSec  = 0;
+    burstIdx        = 0;
+    burstFrames     = 0;
+    burstSNRSum     = 0;
+    burstBERSum     = 0;
+    burstCrcPass    = 0;
+    burstStartSec   = 0;
 
     % --- cumulative ---
     totalFramesDet = 0;
+    totalCrcPass   = 0;
     totalBitsGood  = 0;       % sum of (1 - BER) * bits_per_frame
     totalBitsAll   = 0;       % bits_per_frame * detected
     cumSNRSum      = 0;
@@ -102,6 +104,7 @@ function run_rx_burst(params, burst, phase, rx, uiCtx)
     logFrames     = [];
     logMeanSNR    = [];
     logMeanBER    = [];
+    logCrcRate    = [];
     logDur        = [];
     logStartSec   = [];
     logTxBurstMin = [];
@@ -171,11 +174,13 @@ function run_rx_burst(params, burst, phase, rx, uiCtx)
             else
                 bucketTxBurstMax = inferredTxBurst;   % monotonic
             end
-            burstFrames = burstFrames + 1;
-            burstSNRSum = burstSNRSum + res.snr_dB;
-            burstBERSum = burstBERSum + res.ber;
+            burstFrames  = burstFrames + 1;
+            burstSNRSum  = burstSNRSum + res.snr_dB;
+            burstBERSum  = burstBERSum + res.ber;
+            burstCrcPass = burstCrcPass + double(res.crc_pass);
 
             totalFramesDet = totalFramesDet + 1;
+            totalCrcPass   = totalCrcPass + double(res.crc_pass);
             cumSNRSum      = cumSNRSum + res.snr_dB;
             cumSNRn        = cumSNRn + 1;
             totalBitsAll   = totalBitsAll  + refs.bits_per_frame;
@@ -184,9 +189,11 @@ function run_rx_burst(params, burst, phase, rx, uiCtx)
             if burstFrames >= burst.rxFramesPerReport
                 meanSNR = burstSNRSum / burstFrames;
                 meanBER = burstBERSum / burstFrames;
+                crcRate = burstCrcPass / burstFrames;
                 dur     = elapsed - burstStartSec;
                 cumBER  = 1 - totalBitsGood / max(totalBitsAll, 1);
                 cumSNR  = cumSNRSum / max(cumSNRn, 1);
+                cumCrc  = totalCrcPass / max(totalFramesDet, 1);
                 if burst.rxVerbose
                     if burst.inferTxBurstOnRx
                         if bucketTxBurstMin == bucketTxBurstMax
@@ -198,11 +205,11 @@ function run_rx_burst(params, burst, phase, rx, uiCtx)
                         txTag = '';
                     end
                     fprintf(['[bucket %3d] frames=%d dur=%5.2fs %s ' ...
-                             'SNR=%5.1fdB BER=%.2e  ||  ' ...
-                             'cum frames=%d cumSNR=%5.1fdB cumBER=%.2e\n'], ...
+                             'SNR=%5.1fdB BER=%.2e CRC=%3.0f%%  ||  ' ...
+                             'cum frames=%d cumSNR=%5.1fdB cumBER=%.2e cumCRC=%3.0f%%\n'], ...
                             burstIdx, burstFrames, dur, txTag, ...
-                            meanSNR, meanBER, ...
-                            totalFramesDet, cumSNR, cumBER);
+                            meanSNR, meanBER, 100*crcRate, ...
+                            totalFramesDet, cumSNR, cumBER, 100*cumCrc);
                 end
 
                 % append to log vectors
@@ -210,17 +217,20 @@ function run_rx_burst(params, burst, phase, rx, uiCtx)
                 logFrames(end+1)     = burstFrames;     %#ok<AGROW>
                 logMeanSNR(end+1)    = meanSNR;         %#ok<AGROW>
                 logMeanBER(end+1)    = meanBER;         %#ok<AGROW>
+                logCrcRate(end+1)    = crcRate;         %#ok<AGROW>
                 logDur(end+1)        = dur;             %#ok<AGROW>
                 logStartSec(end+1)   = burstStartSec;   %#ok<AGROW>
                 logTxBurstMin(end+1) = bucketTxBurstMin;%#ok<AGROW>
                 logTxBurstMax(end+1) = bucketTxBurstMax;%#ok<AGROW>
 
-                % UI hook for live plots
+                % UI hook for live plots (legacy 8-arg signature preserved;
+                % CRC rate appended as a 9th arg - older callbacks ignore it)
                 uiCtx.onBucket(burstIdx, meanSNR, meanBER, ...
                                bucketTxBurstMin, bucketTxBurstMax, ...
-                               cumSNR, cumBER, totalFramesDet);
+                               cumSNR, cumBER, totalFramesDet, crcRate);
 
                 burstFrames = 0; burstSNRSum = 0; burstBERSum = 0;
+                burstCrcPass = 0;
                 bucketTxBurstMin = NaN; bucketTxBurstMax = NaN;
             end
         end
@@ -250,6 +260,11 @@ function run_rx_burst(params, burst, phase, rx, uiCtx)
             recSNR   = mean(recentSNR, 'omitnan');
             recBER   = mean(recentBER, 'omitnan');
             tputKbps = totalBitsGood / max(elapsed,1e-3) / 1e3;
+            if totalFramesDet > 0
+                cumCrcDash = totalCrcPass / totalFramesDet;
+            else
+                cumCrcDash = NaN;
+            end
 
             if elapsed < params.sched.calibSeconds || isnan(baselineSNR)
                 statusTxt = 'CALIBRATING...'; statusCol = [0.85 0.65 0.1];
@@ -258,6 +273,7 @@ function run_rx_burst(params, burst, phase, rx, uiCtx)
                 if ~isnan(recSNR) && recSNR < baselineSNR - params.detect.snrDropDb, jammed = true; end
                 if detRate < params.detect.detRateJam,                               jammed = true; end
                 if ~isnan(recBER) && recBER > params.detect.berJam,                  jammed = true; end
+                if ~isnan(cumCrcDash) && cumCrcDash < params.detect.crcPassJam,      jammed = true; end
                 if jammed
                     statusTxt = 'JAMMING DETECTED'; statusCol = [0.85 0.15 0.15];
                 else
@@ -266,7 +282,7 @@ function run_rx_burst(params, burst, phase, rx, uiCtx)
             end
 
             update_dashboard(dash, statusTxt, statusCol, totalFramesDet, ...
-                detRate, recBER, recSNR, baselineSNR, tputKbps);
+                detRate, recBER, recSNR, baselineSNR, tputKbps, cumCrcDash);
 
             wantTight = strcmp(statusTxt, 'LINK OK');
             if ~isequal(wantTight, curTight)
@@ -287,8 +303,11 @@ function run_rx_burst(params, burst, phase, rx, uiCtx)
     if burst.inferTxBurstOnRx
         fprintf('  inferred TX bursts seen = %d\n', inferredTxBurst);
     end
+    cumCrc = totalCrcPass / max(totalFramesDet, 1);
     fprintf('  cumulative SNR    = %.2f dB\n', cumSNR);
     fprintf('  cumulative BER    = %.3e\n', cumBER);
+    fprintf('  cumulative CRC    = %.1f%% (%d / %d frames)\n', ...
+            100*cumCrc, totalCrcPass, totalFramesDet);
     fprintf('  good bits         = %.0f / %.0f\n', totalBitsGood, totalBitsAll);
 
     % --- offline log save ---
@@ -298,12 +317,15 @@ function run_rx_burst(params, burst, phase, rx, uiCtx)
         log.frames             = logFrames;
         log.meanSNR_dB         = logMeanSNR;
         log.meanBER            = logMeanBER;
+        log.crcRate            = logCrcRate;
         log.durSec             = logDur;
         log.startSec           = logStartSec;
         log.inferredTxBurstMin = logTxBurstMin;
         log.inferredTxBurstMax = logTxBurstMax;
         log.totalFramesDet     = totalFramesDet;
+        log.totalCrcPass       = totalCrcPass;
         log.cumBER             = cumBER;
+        log.cumCrcRate         = cumCrc;
         log.cumSNR_dB          = cumSNR;
         log.baselineSNR_dB     = baselineSNR;
         log.params             = params;

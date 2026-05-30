@@ -14,6 +14,7 @@ function res = process_capture(data, sts, lts, frame_len, spec, fs, ...
     res.detected = false;  res.eq_data_syms = []; res.eq_raw_syms = [];
     res.ber = NaN; res.snr_dB = NaN;
     res.cfo_hz = NaN; res.fine_cfo_hz = NaN; res.detect_score = NaN; res.ratio = NaN;
+    res.crc_pass = false;
 
     data = data(:);
     FFT_size = spec.FFT_size;  cp_size = spec.cp_size;  pad_len = spec.pad_len;
@@ -106,6 +107,18 @@ function res = process_capture(data, sts, lts, frame_len, spec, fs, ...
         rx_bits(:,k) = qamdemod(s, qam_num, 'OutputType','bit','UnitAveragePower',true);
     end
     res.ber = sum(rx_bits(:) ~= tx_bits(:)) / numel(tx_bits);
+
+    % CRC-16 over the recovered user-payload bits (the trailing
+    % spec.crc_len bits in column-major order are the CRC tail).
+    rx_bit_stream = rx_bits(:);
+    if spec.crc_len > 0 && numel(rx_bit_stream) > spec.crc_len
+        rx_user = rx_bit_stream(1 : end - spec.crc_len);
+        rx_crc  = rx_bit_stream(end - spec.crc_len + 1 : end);
+        recomp  = compute_crc16(rx_user);
+        res.crc_pass = isequal(rx_crc(:), recomp(:));
+    else
+        res.crc_pass = (res.ber == 0);   % no CRC configured -> fall back to BER
+    end
 
     rxv = eq_data(:);  txv = tx_data_syms(:);
     m = min(numel(rxv),numel(txv));
