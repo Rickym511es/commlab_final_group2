@@ -13,11 +13,21 @@ OFDM_Jammer_Project/
 │                                              tx_console(mode, power) pins one attack
 ├── rx_console.m                  ENTRY (N210): default = full sweep;
 │                                              rx_console(mode) locks RX strategy
+├── tx_burst_console.m            ENTRY (B210, burst mode): duty-cycled TX +
+│                                              one of 5 jammer firing patterns
+├── rx_burst_console.m            ENTRY (N210, burst mode): per-bucket SNR/BER
+│                                              + TX burst-index inference + .mat log
+├── tx_burst_app.m                GUI front-end for tx_burst_console
+│                                              (Start/Stop, sweep, preset, snapshot)
+├── rx_burst_app.m                GUI front-end for rx_burst_console
+│                                              (live BER/SNR charts + above)
 ├── selftest.m                    digital loopback parity check (no hardware)
 │
 ├── config/
-│   └── load_parameters.m         single source of truth: spec / tx / rx
-│                                 / sched / detect / knob
+│   ├── load_parameters.m         single source of truth: spec / tx / rx
+│   │                             / sched / detect / knob
+│   └── default_burst_opts.m      burst orchestration defaults (duty cycle,
+│                                 jammer pattern, RX bucket size, etc.)
 │
 ├── core/                         TX/RX shared low-level
 │   ├── gen_sts.m / gen_lts.m
@@ -29,7 +39,8 @@ OFDM_Jammer_Project/
 │   ├── init_usrp_tx.m / init_usrp_rx.m
 │   ├── compute_crc16.m           real CRC-16-CCITT
 │   ├── normalize_jammer.m / default_rxcfg.m / feed_jam_const.m
-│   └── make_dashboard.m / update_dashboard.m
+│   ├── make_dashboard.m / update_dashboard.m
+│   └── snapshot_figs.m           dump all open figures to PNG (used by GUI apps)
 │
 ├── modes/                        one file per attack: TX build + RX rxcfg
 │   ├── mode00_baseline.m
@@ -48,8 +59,12 @@ OFDM_Jammer_Project/
 │   └── mode_registry.m           expands (mode × type × sweep) → schedule
 │
 └── scripts/
-    ├── run_tx_loop.m             TX while-loop body
-    └── run_rx_loop.m             RX while-loop body
+    ├── run_tx_loop.m             TX while-loop body (full-sweep mode)
+    ├── run_rx_loop.m             RX while-loop body (full-sweep mode)
+    ├── run_tx_burst.m            TX burst loop: duty cycle + jammer pattern,
+    │                             exposes uiCtx hooks for GUI Stop/progress
+    └── run_rx_burst.m            RX burst loop: bucket-flush stats + TX-burst
+                                  inference, uiCtx hooks for live chart updates
 ```
 
 * **OFDM_Jammer_Project/** — 重構後的主架構（建議從這裡跑實驗）
@@ -90,6 +105,41 @@ OFDM_Jammer_Project/
 
 干擾強度由 `knob.noise_power`（純雜訊變體用）與 `knob.jam_power_scale`（結構化變體用）控制，最終以 victim RMS 倍數做 whole-frame 正規化，方便掃描功率對連結的影響。
 
+## Burst-mode 排程實驗（新增，**未在 USRP 上驗證**）
+
+`tx_burst_console` / `rx_burst_console` 與對應的 GUI app（`tx_burst_app` / `rx_burst_app`）是另一條獨立的執行路徑，跟原本的「22 階段 sweep」完全分開。原本的 `tx_console` / `rx_console` / `run_tx_loop` / `run_rx_loop` 不受影響。
+
+### 解決什麼問題
+原本的 console 是「連續傳輸 + 連續 jammer」。burst 模式讓你可以：
+
+* **TX 週期傳**：每個 burst 送 `framesPerBurst` 個 frame，然後沉默 `txPeriodFrames - framesPerBurst` 個 frame 的時間，可以乾淨地把每個 burst 當成一次獨立的「打靶」。
+* **Jammer 5 種觸發 pattern**：
+    * `'continuous'` — 一直開（舊行為）
+    * `'periodic'` — 自己的週期，或對齊 TX duty
+    * `'random'` — 每個 frame 獨立 Bernoulli
+    * `'random_bursts'` — 每個 TX burst 一次 Bernoulli（整 burst 開或關）
+    * `'single_shot'` — 只在指定 burst index 開火（demo「精準一擊」）
+* **RX 桶式累積**：每收到 `rxFramesPerReport` 個 frame 結算一次平均 SNR/BER + 持續累積總計；沒有 TX/RX 時鐘同步，burst 邊界從「相鄰 detection 的時間差 > 預期 off 一半」推回去。
+* **`.mat` log + offline 畫圖**：RX 結束自動存 (`burst.logToMat=true`)，可離線畫 BER vs bucket。
+* **idle auto-stop**：TX 可能只跑十幾秒，RX 預設等 480s 太久 → 設 `rxAutoStopIdleSec` 自動結束。
+
+### GUI（`tx_burst_app` / `rx_burst_app`）
+* 純 `uifigure` 程式碼版（.m，git 友善），不是 App Designer .mlapp。
+* TX 端：mode dropdown、pattern dropdown、burst 參數 spinner、power slider、Dry run checkbox、Save/Load preset、📸 Snapshot、Start/Stop。
+* RX 端：同樣的選單 + RX 桶大小、idle 停止、`.mat` log 選項；**右側兩張 live chart**：BER vs bucket（semilog y）+ SNR vs bucket。
+* **Mode sweep**：文字框輸入 `9,10,11` 即可在按一次 Start 後連跑多個 mode（unique + stable order）。
+* **Snapshot**：一鍵把所有開著的 figure（uifigure / timescope / spectrumAnalyzer / ConstellationDiagram / dashboard）全部 `exportgraphics` 成 PNG，存到 `snapshots_YYYYMMDD_HHMMSS/` 資料夾。
+* **Dry run**：勾起來不需要 USRP，10× 加速時序驗證 UI（Start/Stop 是否即時、進度 label 是否更新、validation 錯誤訊息是否清楚）。
+
+### ⚠ 已知未驗證
+這套程式碼**只跑過 dry-run path，還沒上 USRP smoke test**。預期可能踩到的雷：
+* USRP TX pipeline 對「ch1 突然從 frame 變零再變回 frame」的 underrun 行為。
+* 真實 RX 收到的 frame 間隔抖動會不會讓「gap > 0.5 × expectedOff」的推斷誤觸發 / 漏觸發。
+* mode 9/10/11/12 在 burst 模式下 jammer 只建一次重用是否真的跟連續模式等價。
+* GUI 主迴圈 `drawnow limitrate` 是否在 USRP 高 frame rate 下搶 CPU 造成 underrun。
+
+下次帶設備跑時建議的 smoke test：先 `mode=0`（baseline）+ `pattern='continuous'` 確認 burst TX 自己會送、會停；再 `mode=8`（broadband）+ `pattern='single_shot'`，看 RX 端的 BER 曲線在指定 burst 是否真的爆。
+
 ## 系統需求與執行方式
 1.  **硬體支援:** USRP B210 (TX端) 與 USRP N200/N210 (RX端)。
 2.  **軟體需求:** MATLAB (需安裝 Communications Toolbox, DSP System Toolbox, USRP Support Package)。
@@ -109,6 +159,8 @@ OFDM_Jammer_Project/
 * [x] 發送端 (TX) 的 CRC-16 ECC 封裝雛形（`jammer1.m` 沙盒 → 已整合至 `OFDM_Jammer_Project/core/compute_crc16.m`）。
 * [x] 重構為 `OFDM_Jammer_Project/`：參數驅動、單一來源 spec、每個攻擊一檔（TX build + RX rxcfg），杜絕舊架構 TX/RX 三陣列手動同步的踩雷。
 * [x] `selftest.m` 數位 loopback parity check（22 階段全跑、無需硬體）。
+* [x] **Burst-mode 排程 harness + GUI apps**（`tx_burst_console` / `rx_burst_console` / `tx_burst_app` / `rx_burst_app`）— duty-cycle TX、5 種 jammer 觸發 pattern、桶式 SNR/BER 累積、TX burst 索引推斷、live BER/SNR 圖、preset save/load、全 figure 一鍵截圖、`.mat` log。
 * [ ] **硬體 parity 驗收。** OFDM_Jammer_Project 在 USRP 上跑出與 `jam_experiment/` 同等行為後，移除舊版資料夾。
+* [ ] **Burst-mode hardware smoke test。** 上述新 harness 僅做過 code review + dry-run path，**未在實際 USRP 上實跑**，預期會踩到 frame timing / USRP pipeline / mode 互動的 bug。
 * [ ] **待完成：CRC-16 端到端整合。** TX 目前仍未把 CRC 附在 frame 內；core 已備好 `compute_crc16`，待 `build_frame` 與 `process_capture` 串接後啟用驗證。
 * [ ] 對抗 jammer 的調適性策略 (例如 frequency hopping、interleaving + FEC) 與量化評估。
