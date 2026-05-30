@@ -1,25 +1,24 @@
 function m = mode09_bandlimited_awgn()
-% mode09_bandlimited_awgn  TODO9-2 - band-limited AWGN (BW sweep).
+% mode09_bandlimited_awgn  TODO9-2 - band-limited AWGN.
 %   Injects complex noise in a frequency window of width
-%   round(N * knob.awgn_bw_ratio(bw_idx)) bins centered around DC.
-%   Direct N-point frequency-domain construction avoids the periodicity
-%   artifacts of the older ifft(64)+repmat approach.
+%   round(N * knob.awgn_bw_ratio) bins centered around DC.
+%
+%   The fixed [0.2 0.5 1.0] sweep was removed - knob.awgn_bw_ratio is now
+%   a single scalar set by load_parameters or overridden at the console
+%   call site, e.g. tx_console(9, 1, 'bw_ratio', 0.3).
+%   To compare multiple bandwidths, call tx_console multiple times.
     m.id    = 9;
     m.todo  = 'TODO9-2 限頻 AWGN';
     m.types = [2];
-    m.sweep = 'awgn_bw_ratio';   % schedule iterates 1..length(knob.awgn_bw_ratio)
+    m.sweep = '';
     m.build = @build;
     m.rxcfg = @(opt, p) opt;
 end
 
-function jammer = build(~, bw_idx, tx_signal, ~, ~, knob)
+function jammer = build(~, ~, tx_signal, ~, ~, knob)
     N = length(tx_signal);
     tx_rms = rms(tx_signal);
-    if bw_idx >= 1 && bw_idx <= length(knob.awgn_bw_ratio)
-        bw_ratio = knob.awgn_bw_ratio(bw_idx);
-    else
-        bw_ratio = knob.awgn_bw_ratio(1);
-    end
+    bw_ratio = max(0, min(1, knob.awgn_bw_ratio(1)));   % clamp [0,1]
     bw_bins  = max(1, round(N * bw_ratio));
     center   = floor(N/2) + 1;
     bin_lo   = max(1, center - floor(bw_bins/2));

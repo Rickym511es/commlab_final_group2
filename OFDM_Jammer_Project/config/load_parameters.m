@@ -78,9 +78,11 @@ function params = load_parameters()
     knob.fine_cfo_hz      = 120e3;   % mode 3: LTS copy1 injected CFO
     knob.pilot_cfo_hz     = 60e3;    % mode 4: data CFO via pilots
     knob.flower_petals    = 6;       % mode 7: flower constellation petals
-    knob.awgn_bw_ratio    = [0.2, 0.5, 1.0];   % mode 9 bandwidth sweep
-    knob.single_tone_freq = 100e3;             % mode 10
-    knob.multi_tone_freqs = [50e3, 120e3, 200e3]; % mode 11
-    knob.multi_tone_amps  = [1.0, 0.8, 0.6];   % mode 11
+    knob.awgn_bw_ratio    = 0.5;     % mode 9: single scalar in [0,1];
+                                     %   override at console with
+                                     %   tx_console(9, power, 'bw_ratio', x)
+    knob.single_tone_freq = 100e3;   % mode 10: override with 'freq', f
+    knob.multi_tone_freqs = [50e3, 120e3, 200e3]; % mode 11: override with 'freqs', F
+    knob.multi_tone_amps  = [1.0, 0.8, 0.6];      % mode 11: override with 'amps', A
     params.knob = knob;
 end
