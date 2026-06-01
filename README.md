@@ -38,6 +38,7 @@ OFDM_Jammer_Project/
 │   ├── estimate_channel.m / ofdm_demod_symbol.m / equalize_symbol.m
 │   ├── init_usrp_tx.m / init_usrp_rx.m
 │   ├── compute_crc16.m           real CRC-16-CCITT
+│   ├── gen_lorawan_frame.m       LoRaWAN 1.0.x data PHYPayload helper
 │   ├── normalize_jammer.m / default_rxcfg.m / feed_jam_const.m
 │   ├── make_dashboard.m / update_dashboard.m
 │   └── snapshot_figs.m           dump all open figures to PNG (used by GUI apps)
@@ -134,6 +135,21 @@ CRC 結果在三條路徑都會出現：
 QPSK 的時域樣本量級比 16-QAM 均勻，導致 `detect_sts_autocorr` 在 frame 結尾的窗緣會出現 `|P|/R` 數值爆衝（窗內幾乎都是 pad zero 配上單一個小幅度 data sample，造成 R→0 但 P 非零）。修法：對 `Rseq` 加 5% 的相對 floor mask，能量太低的窗位直接視為無效。Baseline 偵測分數依舊 1.00，但 trailing-edge 的假峰被壓掉，不會被誤判為 frame。
 
 
+## LoRaWAN Frame Helper（新增）
+
+`OFDM_Jammer_Project/core/gen_lorawan_frame.m` 可產生 LoRaWAN 1.0.x data `PHYPayload`，組成為 `MHDR | FHDR | FPort | encrypted FRMPayload | MIC`。預設會產生 unconfirmed uplink frame，並用 LoRaWAN AES-128 payload encryption 與 AES-CMAC MIC 規則輸出 frame bytes、hex 字串，以及 MSB/LSB-first bit vectors。
+
+範例：
+
+```matlab
+addpath(genpath('OFDM_Jammer_Project'));
+[phyPayload, fields] = gen_lorawan_frame();
+disp(fields.hex)
+```
+
+常用參數可透過 `opts` 傳入，例如 `mType`、`devAddr`、`fCnt`、`fPort`、`payload`、`nwkSKey`、`appSKey`、`fOpts`。目前 helper 產生的是 LoRaWAN MAC frame bytes，不是 LoRa chirp waveform。
+
+
 ## Burst-mode 排程實驗（新增，**未在 USRP 上驗證**）
 
 `tx_burst_console` / `rx_burst_console` 與對應的 GUI app（`tx_burst_app` / `rx_burst_app`）是另一條獨立的執行路徑，跟原本的「22 階段 sweep」完全分開。原本的 `tx_console` / `rx_console` / `run_tx_loop` / `run_rx_loop` 不受影響。
@@ -189,6 +205,7 @@ QPSK 的時域樣本量級比 16-QAM 均勻，導致 `detect_sts_autocorr` 在 f
 * [x] 重構為 `OFDM_Jammer_Project/`：參數驅動、單一來源 spec、每個攻擊一檔（TX build + RX rxcfg），杜絕舊架構 TX/RX 三陣列手動同步的踩雷。
 * [x] `selftest.m` 數位 loopback parity check（22 階段全跑、無需硬體）。
 * [x] **Burst-mode 排程 harness + GUI apps**（`tx_burst_console` / `rx_burst_console` / `tx_burst_app` / `rx_burst_app`）— duty-cycle TX、5 種 jammer 觸發 pattern、桶式 SNR/BER 累積、TX burst 索引推斷、live BER/SNR 圖、preset save/load、全 figure 一鍵截圖、`.mat` log。
+* [x] **LoRaWAN frame helper**：新增 `gen_lorawan_frame.m`，可產生 LoRaWAN 1.0.x data PHYPayload bytes、hex 與 bit vectors。
 * [ ] **硬體 parity 驗收。** OFDM_Jammer_Project 在 USRP 上跑出與 `jam_experiment/` 同等行為後，移除舊版資料夾。
 * [ ] **Burst-mode hardware smoke test。** 上述新 harness 僅做過 code review + dry-run path，**未在實際 USRP 上實跑**，預期會踩到 frame timing / USRP pipeline / mode 互動的 bug。
 * [ ] **待完成：CRC-16 端到端整合。** TX 目前仍未把 CRC 附在 frame 內；core 已備好 `compute_crc16`，待 `build_frame` 與 `process_capture` 串接後啟用驗證。
