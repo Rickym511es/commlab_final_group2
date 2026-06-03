@@ -54,7 +54,9 @@ function run_tx_burst(params, burst, phase, tx, uiCtx)
         stopAt   = burst.runSeconds;
     else
         stopMode = 'bursts';
-        stopAt   = burst.numBursts * burst.txPeriodFrames;     % frames
+        % allow for the TX silence prefix when counting frames
+        stopAt   = burst.txStartOffsetFrames + ...
+                   burst.numBursts * burst.txPeriodFrames;     % frames
     end
 
     % --- random patterns: seed if requested ---
@@ -113,9 +115,20 @@ function run_tx_burst(params, burst, phase, tx, uiCtx)
         if uiCtx.shouldStop(), break; end
         iter = iter + 1;
         frameIdx = iter - 1;                                 % 0-based
-        burstPos = mod(frameIdx, burst.txPeriodFrames);
-        burstIdx = floor(frameIdx / burst.txPeriodFrames) + 1; % 1-based
-        tx_on    = burstPos < burst.framesPerBurst;
+        % apply TX schedule offset; before offset TX is silent
+        txEffFrame = frameIdx - burst.txStartOffsetFrames;
+        if txEffFrame < 0
+            burstPos = 0;
+            burstIdx = -1;                                   % matches init lastBurstIdx
+            tx_on    = false;
+        else
+            burstPos = mod(txEffFrame, burst.txPeriodFrames);
+            burstIdx = floor(txEffFrame / burst.txPeriodFrames) + 1; % 1-based
+            tx_on    = burstPos < burst.framesPerBurst;
+            if burstIdx > burst.numBursts
+                tx_on = false;                               % scheduled TX done
+            end
+        end
 
         % roll per-burst random decision at burst edge (before deciding jam_on)
         if burstIdx ~= lastBurstIdx
@@ -132,27 +145,30 @@ function run_tx_burst(params, burst, phase, tx, uiCtx)
         if tx_on,  txMat(:,1) = real_frame; else, txMat(:,1) = zero_ch; end
         if jam_on, txMat(:,2) = jammer;     else, txMat(:,2) = zero_ch; end
 
-        % log burst-edge transitions
+        % log burst-edge transitions (only for real TX bursts, not the
+        % pre-offset silence or the post-numBursts trailing silence)
         if burstIdx ~= lastBurstIdx
             lastBurstIdx = burstIdx;
-            elapsed = toc(t0);
-            if jam_available
-                jamRmsRatio = rms(jammer) / max(tx_rms, 1e-12);
-            else
-                jamRmsRatio = 0;
-            end
-            tagTxt = '';
-            if strcmp(burst.jammerPattern, 'random_bursts')
-                if currentBurstJamDecision, tagTxt = ' [jam=YES]'; else, tagTxt = ' [jam=no]'; end
-            elseif strcmp(burst.jammerPattern, 'single_shot')
-                if burstIdx == burst.singleShotBurst, tagTxt = ' [SINGLE SHOT]'; end
-            end
-            fprintf('[%6.1fs] >>> burst %d starts | jam_rms/tx_rms=%.2f%s\n', ...
-                    elapsed, burstIdx, jamRmsRatio, tagTxt);
-            if params.tx.liveDisplay
-                ts([real(txMat(:,1)), real(txMat(:,2))]);
+            if burstIdx >= 1 && burstIdx <= burst.numBursts
+                elapsed = toc(t0);
                 if jam_available
-                    feed_jam_const(cd_jam, jammer, info);
+                    jamRmsRatio = rms(jammer) / max(tx_rms, 1e-12);
+                else
+                    jamRmsRatio = 0;
+                end
+                tagTxt = '';
+                if strcmp(burst.jammerPattern, 'random_bursts')
+                    if currentBurstJamDecision, tagTxt = ' [jam=YES]'; else, tagTxt = ' [jam=no]'; end
+                elseif strcmp(burst.jammerPattern, 'single_shot')
+                    if burstIdx == burst.singleShotBurst, tagTxt = ' [SINGLE SHOT]'; end
+                end
+                fprintf('[%6.1fs] >>> burst %d starts | jam_rms/tx_rms=%.2f%s\n', ...
+                        elapsed, burstIdx, jamRmsRatio, tagTxt);
+                if params.tx.liveDisplay
+                    ts([real(txMat(:,1)), real(txMat(:,2))]);
+                    if jam_available
+                        feed_jam_const(cd_jam, jammer, info);
+                    end
                 end
             end
         end
@@ -202,8 +218,16 @@ function jam_on = decide_jammer(burst, frameIdx, burstIdx, burstPos, tx_on, jam_
             if burst.alignJamToTx
                 jam_on = tx_on;
             else
-                jamPos = mod(frameIdx, burst.jamPeriodFrames);
-                jam_on = jamPos < burst.jamOnFrames;
+                offsetFrame = frameIdx - burst.jamStartOffsetFrames;
+                if offsetFrame < 0
+                    jam_on = false;
+                elseif burst.jamMaxFires > 0 && ...
+                       floor(offsetFrame / burst.jamPeriodFrames) >= burst.jamMaxFires
+                    jam_on = false;
+                else
+                    jamPos = mod(offsetFrame, burst.jamPeriodFrames);
+                    jam_on = jamPos < burst.jamOnFrames;
+                end
             end
         case 'random'
             jam_on = rand() < burst.jamRandomProb;

@@ -1,13 +1,12 @@
 function rx_burst_app()
 % rx_burst_app  uifigure dashboard for run_rx_burst.
-%   Same interaction model as tx_burst_app: Start/Stop run in-thread,
-%   uiCtx hooks let the loop call back per bucket so the app appends
-%   points to live BER and SNR plots.  The legacy spectrumAnalyzer /
-%   timescope / make_dashboard windows still pop up alongside.
+%   Press Start -> RX runs forever until Stop (or window close).
+%   No mode selection, no auto-stop, no TX-burst inference.  Internally
+%   pinned to mode 0 baseline rxcfg; runSeconds is overridden to inf.
 %
 %   Features:
 %     - Live BER vs bucket (semilog) + SNR vs bucket charts
-%     - Mode sweep extras (comma list) like tx_burst_app
+%     - Bucket size spinner (rxFramesPerReport)
 %     - Save / Load preset (.mat)
 %     - Snapshot (PNG dump of every open figure incl. the legacy ones)
 %     - Dry run (no USRP) - synthesizes bucket data so you can verify
@@ -15,18 +14,20 @@ function rx_burst_app()
 
     addpath(genpath(fileparts(mfilename('fullpath'))));
 
+    PINNED_MODE = 0;   % baseline rxcfg; see core/default_rxcfg.m
+
     % ---- figure ------------------------------------------------------
-    fig = uifigure('Name', 'Burst RX Lab', 'Position', [80 60 980 680]);
+    fig = uifigure('Name', 'Burst RX Lab', 'Position', [80 60 980 560]);
     setappdata(fig, 'running',       false);
     setappdata(fig, 'stopRequested', false);
 
     outer = uigridlayout(fig, [1 2]);
-    outer.ColumnWidth = {340, '1x'};
+    outer.ColumnWidth = {320, '1x'};
     outer.Padding     = [10 10 10 10];
 
-    leftCol = uigridlayout(outer, [16 2]);
-    leftCol.RowHeight   = repmat({'fit'}, 1, 16);
-    leftCol.ColumnWidth = {150, '1x'};
+    leftCol = uigridlayout(outer, [10 2]);
+    leftCol.RowHeight   = repmat({'fit'}, 1, 10);
+    leftCol.ColumnWidth = {140, '1x'};
     leftCol.RowSpacing  = 6;
     leftCol.Padding     = [0 0 0 0];
 
@@ -34,34 +35,12 @@ function rx_burst_app()
     rightCol.RowHeight = {'1x', '1x'};
     rightCol.Padding   = [0 0 0 0];
 
-    % ---- mode dropdown ----------------------------------------------
-    modes      = mode_registry();
-    modeItems  = cell(1, numel(modes));
-    modeIdData = zeros(1, numel(modes));
-    for i = 1:numel(modes)
-        modeItems{i}  = sprintf('%d  %s', modes{i}.id, modes{i}.todo);
-        modeIdData(i) = modes{i}.id;
-    end
     defBurst = default_burst_opts();
 
-    uilabel(leftCol, 'Text', 'Jammer mode (primary):');
-    ddMode = uidropdown(leftCol, 'Items', modeItems, 'ItemsData', modeIdData, ...
-                                  'Value', 8);
-
-    uilabel(leftCol, 'Text', 'Mode sweep (extras):');
-    efSweep = uieditfield(leftCol, 'text', ...
-        'Placeholder', 'e.g. 9,10,11');
-
+    % ---- bucket size -------------------------------------------------
     spRxReport = add_spinner(leftCol, 'rxFramesPerReport:', defBurst.rxFramesPerReport, [1 100000]);
-    spAutoStop = add_spinner(leftCol, 'rxAutoStopIdleSec:', defBurst.rxAutoStopIdleSec, [0 3600]);
 
-    spFramesPerBurst = add_spinner(leftCol, 'framesPerBurst (TX):', defBurst.framesPerBurst, [1 100000]);
-    spTxPeriodFrames = add_spinner(leftCol, 'txPeriodFrames (TX):', defBurst.txPeriodFrames, [1 100000]);
-
-    uilabel(leftCol, 'Text', '');
-    cbInferTx = uicheckbox(leftCol, 'Text', 'Infer TX burst from gap', ...
-                                    'Value', defBurst.inferTxBurstOnRx);
-
+    % ---- logging -----------------------------------------------------
     uilabel(leftCol, 'Text', '');
     cbLogToMat = uicheckbox(leftCol, 'Text', 'Save log to .mat at end', ...
                                      'Value', defBurst.logToMat);
@@ -69,12 +48,17 @@ function rx_burst_app()
     uilabel(leftCol, 'Text', 'log path (blank = auto):');
     efLogPath = uieditfield(leftCol, 'text', 'Value', defBurst.logMatPath);
 
+    % ---- dry run -----------------------------------------------------
     uilabel(leftCol, 'Text', '');
     cbDryRun = uicheckbox(leftCol, 'Text', 'Dry run (synthesize buckets)', 'Value', false);
 
+    % ---- diagnostic windows ------------------------------------------
     uilabel(leftCol, 'Text', '');
-    cbClearPerMode = uicheckbox(leftCol, 'Text', 'Clear plot per mode (sweep)', 'Value', true);
+    cbShowDiag = uicheckbox(leftCol, ...
+        'Text', 'Show spectrum / timescope / constellation / dashboard', ...
+        'Value', true);
 
+    % ---- preset + snapshot row --------------------------------------
     uilabel(leftCol, 'Text', '');
     miscRow = uigridlayout(leftCol, [1 3]);
     miscRow.ColumnSpacing = 8;
@@ -83,6 +67,7 @@ function rx_burst_app()
     btnLoad = uibutton(miscRow, 'Text', 'Load preset...');
     btnSnap = uibutton(miscRow, 'Text', '📸 Snapshot');
 
+    % ---- start / stop ------------------------------------------------
     uilabel(leftCol, 'Text', '');
     btnRow = uigridlayout(leftCol, [1 2]);
     btnRow.ColumnSpacing = 10;
@@ -134,24 +119,12 @@ function rx_burst_app()
         btnStart.Enable = 'off';
         btnStop.Enable  = 'on';
         lblStatus.Text  = 'starting...';
+        clearpoints(linBER); clearpoints(linSNR);
+        lblCum.Text = '—';
         drawnow;
 
         try
-            modeList = build_mode_list();
-            for k = 1:numel(modeList)
-                if getappdata(fig, 'stopRequested'), break; end
-                m = modeList(k);
-                if numel(modeList) > 1
-                    lblStatus.Text = sprintf('sweep %d/%d: mode %d', ...
-                                             k, numel(modeList), m);
-                    drawnow;
-                end
-                if cbClearPerMode.Value && k > 1
-                    clearpoints(linBER); clearpoints(linSNR);
-                    lblCum.Text = '—';
-                end
-                run_one_mode(m);
-            end
+            run_session();
         catch ME
             lblStatus.Text = sprintf('ERROR: %s', ME.message);
             fprintf(2, 'rx_burst_app run error:\n%s\n', getReport(ME));
@@ -175,46 +148,31 @@ function rx_burst_app()
         delete(fig);
     end
 
-    function modeList = build_mode_list()
-        modeList = ddMode.Value;
-        extrasStr = strtrim(efSweep.Value);
-        if ~isempty(extrasStr)
-            tokens = regexp(extrasStr, '[\s,]+', 'split');
-            extras = zeros(1, 0);
-            for i = 1:numel(tokens)
-                if isempty(tokens{i}), continue; end
-                v = str2double(tokens{i});
-                if isnan(v)
-                    error('Could not parse mode-sweep entry "%s"', tokens{i});
-                end
-                extras(end+1) = v; %#ok<AGROW>
-            end
-            modeList = unique([modeList, extras], 'stable');
-        end
-    end
-
-    function run_one_mode(modeId)
+    function run_session()
         burst = defBurst;
         burst.rxFramesPerReport = spRxReport.Value;
-        burst.rxAutoStopIdleSec = spAutoStop.Value;
-        burst.framesPerBurst    = spFramesPerBurst.Value;
-        burst.txPeriodFrames    = spTxPeriodFrames.Value;
-        burst.inferTxBurstOnRx  = cbInferTx.Value;
+        burst.rxAutoStopIdleSec = 0;       % never auto-stop
+        burst.inferTxBurstOnRx  = false;   % no TX-burst inference
         burst.logToMat          = cbLogToMat.Value;
         burst.logMatPath        = efLogPath.Value;
 
         params = load_parameters();
+        params.sched.runSeconds = inf;     % run until user presses Stop
 
-        sched = mode_registry('schedule', params, modeId);
+        sched = mode_registry('schedule', params, PINNED_MODE);
         if isempty(sched)
-            error('No schedule entry for mode %d.', modeId);
+            error('No schedule entry for mode %d.', PINNED_MODE);
         end
         phase = sched(1);
 
         uiCtx = struct( ...
             'shouldStop', @() getappdata(fig, 'stopRequested'), ...
-            'onBucket',   @(bIdx, snr, ber, txMin, txMax, cSNR, cBER, totDet) ...
-                          ui_on_bucket(bIdx, snr, ber, txMin, txMax, cSNR, cBER, totDet));
+            'onBucket',   @(bIdx, snr, ber, txMin, txMax, cSNR, cBER, totDet, crcRate) ...
+                          ui_on_bucket(bIdx, snr, ber, cSNR, cBER, totDet, crcRate), ...
+            'headless',   ~cbShowDiag.Value);
+
+        lblStatus.Text = 'running';
+        drawnow;
 
         if cbDryRun.Value
             run_dry_rx(params, burst, phase, uiCtx);
@@ -225,21 +183,12 @@ function rx_burst_app()
         end
     end
 
-    function ui_on_bucket(bucketIdx, meanSNR, meanBER, txMin, txMax, cumSNR, cumBER, totalFramesDet)
-        % append to live plots
+    function ui_on_bucket(bucketIdx, meanSNR, meanBER, cumSNR, cumBER, totalFramesDet, crcRate)
         addpoints(linBER, bucketIdx, max(meanBER, 1e-6));     % log floor
         addpoints(linSNR, bucketIdx, meanSNR);
-
-        if isnan(txMin)
-            txTag = '';
-        elseif txMin == txMax
-            txTag = sprintf(' (tx=%d)', txMin);
-        else
-            txTag = sprintf(' (tx=%d..%d)', txMin, txMax);
-        end
         lblCum.Text = sprintf( ...
-            'frames=%d  cumSNR=%.1fdB  cumBER=%.2e   last bucket SNR=%.1fdB BER=%.2e%s', ...
-            totalFramesDet, cumSNR, cumBER, meanSNR, meanBER, txTag);
+            'frames=%d  cumSNR=%.1fdB  cumBER=%.2e   last bucket SNR=%.1fdB BER=%.2e CRC=%.0f%%', ...
+            totalFramesDet, cumSNR, cumBER, meanSNR, meanBER, 100*crcRate);
         drawnow limitrate;
     end
 
@@ -271,33 +220,19 @@ function rx_burst_app()
     end
 
     function preset = collect_preset()
-        preset.modeId             = ddMode.Value;
-        preset.sweepExtras        = efSweep.Value;
         preset.rxFramesPerReport  = spRxReport.Value;
-        preset.rxAutoStopIdleSec  = spAutoStop.Value;
-        preset.framesPerBurst     = spFramesPerBurst.Value;
-        preset.txPeriodFrames     = spTxPeriodFrames.Value;
-        preset.inferTxBurstOnRx   = cbInferTx.Value;
         preset.logToMat           = cbLogToMat.Value;
         preset.logMatPath         = efLogPath.Value;
         preset.dryRun             = cbDryRun.Value;
-        preset.clearPerMode       = cbClearPerMode.Value;
+        preset.showDiag           = cbShowDiag.Value;
     end
 
     function apply_preset(p)
-        if isfield(p,'modeId') && ismember(p.modeId, modeIdData)
-            ddMode.Value = p.modeId;
-        end
-        if isfield(p,'sweepExtras'),      efSweep.Value          = p.sweepExtras;       end
-        if isfield(p,'rxFramesPerReport'),spRxReport.Value       = p.rxFramesPerReport; end
-        if isfield(p,'rxAutoStopIdleSec'),spAutoStop.Value       = p.rxAutoStopIdleSec; end
-        if isfield(p,'framesPerBurst'),   spFramesPerBurst.Value = p.framesPerBurst;    end
-        if isfield(p,'txPeriodFrames'),   spTxPeriodFrames.Value = p.txPeriodFrames;    end
-        if isfield(p,'inferTxBurstOnRx'), cbInferTx.Value        = logical(p.inferTxBurstOnRx); end
-        if isfield(p,'logToMat'),         cbLogToMat.Value       = logical(p.logToMat); end
-        if isfield(p,'logMatPath'),       efLogPath.Value        = p.logMatPath;        end
-        if isfield(p,'dryRun'),           cbDryRun.Value         = logical(p.dryRun);   end
-        if isfield(p,'clearPerMode'),     cbClearPerMode.Value   = logical(p.clearPerMode); end
+        if isfield(p,'rxFramesPerReport'),spRxReport.Value = p.rxFramesPerReport; end
+        if isfield(p,'logToMat'),         cbLogToMat.Value = logical(p.logToMat); end
+        if isfield(p,'logMatPath'),       efLogPath.Value  = p.logMatPath;        end
+        if isfield(p,'dryRun'),           cbDryRun.Value   = logical(p.dryRun);   end
+        if isfield(p,'showDiag'),         cbShowDiag.Value = logical(p.showDiag); end
     end
 end
 
@@ -318,8 +253,7 @@ end
 function run_dry_rx(params, burst, phase, uiCtx)
 % run_dry_rx  Stand-in for run_rx_burst that needs no USRP.  Generates
 % synthetic per-bucket data so the live plots and cumulative label
-% update.  Mimics a "mostly clean link with a couple of jam bursts"
-% scenario so single_shot-style demos look right in dry run.
+% update.  Runs until the user presses Stop.
 
     [real_frame, ~, refs] = build_frame(params.spec);
     framesPerSec  = params.tx.fs / length(real_frame);
@@ -336,13 +270,11 @@ function run_dry_rx(params, burst, phase, uiCtx)
     cumSNRSum      = 0;
     cumSNRn        = 0;
     totalFramesDet = 0;
-    inferredTx     = 0;
 
     while true
         if uiCtx.shouldStop(), break; end
         pause(bucketSec);
-        bucketIdx  = bucketIdx + 1;
-        inferredTx = inferredTx + 1;
+        bucketIdx = bucketIdx + 1;
 
         % synthetic: mostly clean, periodic "jam" buckets to show plot shape
         if mod(bucketIdx, 7) == 0 || mod(bucketIdx, 11) == 0
@@ -362,9 +294,7 @@ function run_dry_rx(params, burst, phase, uiCtx)
         cumBER = 1 - cumBitsGood / max(cumBitsAll,1);
 
         uiCtx.onBucket(bucketIdx, meanSNR, meanBER, ...
-                       inferredTx, inferredTx, cumSNR, cumBER, totalFramesDet);
-
-        if bucketIdx >= 80, break; end          % cap so dry run terminates
+                       NaN, NaN, cumSNR, cumBER, totalFramesDet);
     end
-    fprintf('[dry-rx] complete. buckets=%d\n', bucketIdx);
+    fprintf('[dry-rx] stopped. buckets=%d\n', bucketIdx);
 end

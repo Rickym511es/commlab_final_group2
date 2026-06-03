@@ -1,34 +1,29 @@
 function tx_burst_app()
-% tx_burst_app  uifigure control panel for tx_burst_console.
-%   Wraps run_tx_burst with interactive controls.  Start triggers a TX
-%   run (USRP or dry-run); Stop sets a flag that run_tx_burst's uiCtx
-%   checks each iteration.  Progress label refreshes while running.
+% tx_burst_app  uifigure for run_tx_burst with independent TX & jammer
+% schedules.
 %
-%   The TX loop still runs in the same MATLAB thread; UI stays alive
-%   because run_tx_burst calls back into ui_progress() each iter, which
-%   calls drawnow limitrate (capped to ~20 fps so it doesn't choke the
-%   USRP feed).
+%   TX schedule  : start offset (s), burst duration (s), interval (s), count
+%   Jammer sched : start offset (s), attack duration (s), interval (s), count
 %
-%   Extras vs the v1 sketch:
-%     - "Mode sweep" text field: comma-separated extras to run after the
-%       primary dropdown selection (e.g. "9,10,11" -> runs 4 modes back
-%       to back, returning to UI between each)
-%     - "Save / Load preset" buttons: persist UI state to/from .mat
-%     - "Snapshot" button: dump every open figure as PNG to a timestamped
-%       folder, so you can capture spectrum/timescope/constellation along
-%       with the app window in one click
+%   Both timelines run on the same wall clock but are otherwise independent.
+%   TX 實驗總長 (s) is the wall-clock stop; either side can finish its
+%   scheduled bursts/attacks before total time and then go silent.
+%
+%   Internally maps to run_tx_burst's existing TX-duty cycle (framesPerBurst /
+%   txPeriodFrames / numBursts / txStartOffsetFrames) plus the 'periodic'
+%   jammer pattern with jamStartOffsetFrames + jamMaxFires.
 
     addpath(genpath(fileparts(mfilename('fullpath'))));
 
     % ---- figure ------------------------------------------------------
-    fig = uifigure('Name', 'Burst TX Lab', 'Position', [120 60 520 720]);
+    fig = uifigure('Name', 'Burst TX Lab', 'Position', [120 40 560 860]);
     setappdata(fig, 'running',       false);
     setappdata(fig, 'stopRequested', false);
 
-    gl = uigridlayout(fig, [14 2]);
-    gl.RowHeight   = repmat({'fit'}, 1, 14);
-    gl.ColumnWidth = {170, '1x'};
-    gl.RowSpacing  = 6;
+    gl = uigridlayout(fig, [20 2]);
+    gl.RowHeight   = repmat({'fit'}, 1, 20);
+    gl.ColumnWidth = {200, '1x'};
+    gl.RowSpacing  = 5;
     gl.Padding     = [12 12 12 12];
 
     % ---- mode dropdown (populated from mode_registry) ----------------
@@ -39,46 +34,41 @@ function tx_burst_app()
         modeItems{i}  = sprintf('%d  %s', modes{i}.id, modes{i}.todo);
         modeIdData(i) = modes{i}.id;
     end
-    defBurst = default_burst_opts();
 
-    uilabel(gl, 'Text', 'Jammer mode (primary):');
+    uilabel(gl, 'Text', 'Jammer mode:', 'FontWeight', 'bold');
     ddMode = uidropdown(gl, 'Items', modeItems, 'ItemsData', modeIdData, ...
                             'Value', 8);
 
-    % ---- mode sweep extras ------------------------------------------
-    uilabel(gl, 'Text', 'Mode sweep (extras):');
-    efSweep = uieditfield(gl, 'text', ...
-        'Placeholder', 'e.g. 9,10,11 (blank = primary only)');
+    % ---- TX section header ------------------------------------------
+    uilabel(gl, 'Text', '— TX 排程 —', 'FontWeight', 'bold');
+    uilabel(gl, 'Text', '');
 
-    % ---- jammer pattern ---------------------------------------------
-    uilabel(gl, 'Text', 'Pattern:');
-    ddPattern = uidropdown(gl, ...
-        'Items', {'continuous','periodic','random','random_bursts','single_shot'}, ...
-        'Value', defBurst.jammerPattern);
+    spTxOffset    = add_dbl_spinner(gl, 'TX 起始位置 (s):',    0.0,  [0 3600], 0.1);
+    spTxDuration  = add_dbl_spinner(gl, 'TX 每段發送 (s):',    1.0,  [0.01 3600], 0.1);
+    spTxInterval  = add_dbl_spinner(gl, 'TX 間隔 (s):',        0.0,  [0 3600], 0.1);
+    spTxCount     = add_int_spinner(gl, 'TX 次數:',            1,    [1 100000]);
 
-    % ---- integer spinners -------------------------------------------
-    spFramesPerBurst   = add_spinner(gl, 'framesPerBurst:',       defBurst.framesPerBurst,      [1 100000]);
-    spTxPeriodFrames   = add_spinner(gl, 'txPeriodFrames:',       defBurst.txPeriodFrames,      [1 100000]);
-    spNumBursts        = add_spinner(gl, 'numBursts:',            defBurst.numBursts,           [1 100000]);
-    spSingleShotBurst  = add_spinner(gl, 'singleShotBurst:',      defBurst.singleShotBurst,     [1 100000]);
-    spDelayBeforeStart = add_spinner(gl, 'delayBeforeStart (s):', defBurst.delayBeforeStartSec, [0 600]);
+    % ---- Jammer section header --------------------------------------
+    uilabel(gl, 'Text', '— Jammer 排程 —', 'FontWeight', 'bold');
+    uilabel(gl, 'Text', '');
 
-    % ---- power slider with live value readout -----------------------
-    uilabel(gl, 'Text', 'jam_power_scale:');
-    powerRow = uigridlayout(gl, [1 2]);
-    powerRow.ColumnWidth = {'1x', 50};
-    powerRow.ColumnSpacing = 8;
-    powerRow.Padding = [0 0 0 0];
-    slPower  = uislider(powerRow, 'Limits', [0 2], 'Value', 1.0);
-    lblPower = uilabel(powerRow, 'Text', '1.00');
-    slPower.ValueChangingFcn = @(s,e) set(lblPower, 'Text', sprintf('%.2f', e.Value));
-    slPower.ValueChangedFcn  = @(s,e) set(lblPower, 'Text', sprintf('%.2f', s.Value));
+    spJamOffset   = add_dbl_spinner(gl, 'Jammer 起始位置 (s):', 1.0,  [0 3600], 0.1);
+    spJamDuration = add_dbl_spinner(gl, '每次攻擊持續 (s):',    0.5,  [0.01 3600], 0.05);
+    spJamInterval = add_dbl_spinner(gl, '攻擊間隔 (s):',        2.0,  [0 3600], 0.1);
+    spJamCount    = add_int_spinner(gl, '攻擊次數:',            5,    [1 1000]);
 
-    % ---- dry run checkbox -------------------------------------------
+    % ---- run-wide controls ------------------------------------------
+    uilabel(gl, 'Text', '— Run —', 'FontWeight', 'bold');
+    uilabel(gl, 'Text', '');
+
+    spTotal       = add_dbl_spinner(gl, 'TX 實驗總長 (s):',     20.0, [1 3600], 1.0);
+
+    [slJamPower, lblJamPower] = add_power_slider(gl, 'Jammer power (jam_power_scale):', 1.0);
+    [slNoisePower, lblNoisePower] = add_power_slider(gl, 'Noise power (noise_power):',  1.0);
+
     uilabel(gl, 'Text', '');
     cbDryRun = uicheckbox(gl, 'Text', 'Dry run (simulate, no USRP)', 'Value', false);
 
-    % ---- preset + snapshot row --------------------------------------
     uilabel(gl, 'Text', '');
     miscRow = uigridlayout(gl, [1 3]);
     miscRow.ColumnSpacing = 8;
@@ -87,7 +77,6 @@ function tx_burst_app()
     btnLoad = uibutton(miscRow, 'Text', 'Load preset...');
     btnSnap = uibutton(miscRow, 'Text', '📸 Snapshot');
 
-    % ---- start / stop buttons ---------------------------------------
     uilabel(gl, 'Text', '');
     btnRow = uigridlayout(gl, [1 2]);
     btnRow.ColumnSpacing = 10;
@@ -99,7 +88,6 @@ function tx_burst_app()
                         'BackgroundColor', [0.88 0.62 0.62], ...
                         'FontWeight', 'bold', 'Enable', 'off');
 
-    % ---- status + progress labels -----------------------------------
     uilabel(gl, 'Text', 'Status:');
     lblStatus = uilabel(gl, 'Text', 'idle', 'FontWeight', 'bold');
 
@@ -124,17 +112,7 @@ function tx_burst_app()
         drawnow;
 
         try
-            modeList = build_mode_list();
-            for k = 1:numel(modeList)
-                if getappdata(fig, 'stopRequested'), break; end
-                m = modeList(k);
-                if numel(modeList) > 1
-                    lblStatus.Text = sprintf('sweep %d/%d: mode %d', ...
-                                             k, numel(modeList), m);
-                    drawnow;
-                end
-                run_one_mode(m);
-            end
+            run_session(ddMode.Value);
         catch ME
             lblStatus.Text = sprintf('ERROR: %s', ME.message);
             fprintf(2, 'tx_burst_app run error:\n%s\n', getReport(ME));
@@ -158,40 +136,51 @@ function tx_burst_app()
         delete(fig);
     end
 
-    function modeList = build_mode_list()
-        modeList = ddMode.Value;
-        extrasStr = strtrim(efSweep.Value);
-        if ~isempty(extrasStr)
-            % accept "8,9,10" or "8 9 10" or "8, 9, 10"
-            tokens = regexp(extrasStr, '[\s,]+', 'split');
-            extras = zeros(1, 0);
-            for i = 1:numel(tokens)
-                if isempty(tokens{i}), continue; end
-                v = str2double(tokens{i});
-                if isnan(v)
-                    error('Could not parse mode-sweep entry "%s"', tokens{i});
-                end
-                extras(end+1) = v; %#ok<AGROW>
-            end
-            modeList = unique([modeList, extras], 'stable');
-        end
-    end
+    function run_session(modeId)
+        txOffsetSec   = spTxOffset.Value;
+        txDurationSec = spTxDuration.Value;
+        txIntervalSec = spTxInterval.Value;
+        txCount       = spTxCount.Value;
 
-    function run_one_mode(modeId)
-        burst = defBurst;
-        burst.framesPerBurst      = spFramesPerBurst.Value;
-        burst.txPeriodFrames      = spTxPeriodFrames.Value;
-        burst.numBursts           = spNumBursts.Value;
-        burst.singleShotBurst     = spSingleShotBurst.Value;
-        burst.delayBeforeStartSec = spDelayBeforeStart.Value;
-        burst.jammerPattern       = ddPattern.Value;
+        jmOffsetSec   = spJamOffset.Value;
+        jmDurationSec = spJamDuration.Value;
+        jmIntervalSec = spJamInterval.Value;
+        jmCount       = spJamCount.Value;
 
-        power  = slPower.Value;
-        dryRun = cbDryRun.Value;
+        runSec        = spTotal.Value;
+        jamPower      = slJamPower.Value;
+        noisePower    = slNoisePower.Value;
+        dryRun        = cbDryRun.Value;
 
         params = load_parameters();
-        params.knob.noise_power     = power;
-        params.knob.jam_power_scale = power;
+        params.knob.jam_power_scale = jamPower;
+        params.knob.noise_power     = noisePower;
+
+        [real_frame, ~, ~] = build_frame(params.spec);
+        frameLen     = length(real_frame);
+        framesPerSec = params.tx.fs / frameLen;
+
+        burst = default_burst_opts();
+
+        % --- TX schedule ---
+        burst.txStartOffsetFrames = max(0, round(txOffsetSec   * framesPerSec));
+        burst.framesPerBurst      = max(1, round(txDurationSec * framesPerSec));
+        burst.txPeriodFrames      = max(burst.framesPerBurst, ...
+                                        round((txDurationSec + txIntervalSec) * framesPerSec));
+        burst.numBursts           = txCount;
+
+        % --- Jammer schedule ---
+        burst.jammerPattern         = 'periodic';
+        burst.alignJamToTx          = false;
+        burst.jamStartOffsetFrames  = max(0, round(jmOffsetSec   * framesPerSec));
+        burst.jamOnFrames           = max(1, round(jmDurationSec * framesPerSec));
+        burst.jamPeriodFrames       = max(burst.jamOnFrames, ...
+                                          round((jmDurationSec + jmIntervalSec) * framesPerSec));
+        burst.jamMaxFires           = jmCount;
+
+        % --- wall-clock cap ---
+        burst.runSeconds          = runSec;
+        burst.delayBeforeStartSec = 0;
 
         sched = mode_registry('schedule', params, modeId);
         if isempty(sched)
@@ -201,7 +190,10 @@ function tx_burst_app()
 
         uiCtx = struct( ...
             'shouldStop', @() getappdata(fig, 'stopRequested'), ...
-            'onProgress', @(iter, bIdx, ur) ui_progress(iter, bIdx, ur, burst.numBursts));
+            'onProgress', @(iter, bIdx, ur) ui_progress(iter, ur, runSec, framesPerSec, txCount, jmCount));
+
+        lblStatus.Text = sprintf('running mode %d', modeId);
+        drawnow;
 
         if dryRun
             run_dry(params, burst, phase, uiCtx);
@@ -212,15 +204,16 @@ function tx_burst_app()
         end
     end
 
-    function ui_progress(iter, burstIdx, underrunCnt, totalBursts)
+    function ui_progress(iter, underrunCnt, runSec, framesPerSec, txCount, jmCount)
         persistent lastTic
         if isempty(lastTic), lastTic = tic; end
         if toc(lastTic) < 0.05, return; end
         lastTic = tic;
 
+        elapsedSec = iter / framesPerSec;
         lblProgress.Text = sprintf( ...
-            'Burst %d / %d    frames sent: %d    underruns: %d', ...
-            burstIdx, totalBursts, iter, underrunCnt);
+            't = %.1f / %.1f s    frames sent: %d    underruns: %d    (TX×%d, jam×%d)', ...
+            elapsedSec, runSec, iter, underrunCnt, txCount, jmCount);
         drawnow limitrate;
     end
 
@@ -252,36 +245,49 @@ function tx_burst_app()
     end
 
     function preset = collect_preset()
-        preset.modeId             = ddMode.Value;
-        preset.sweepExtras        = efSweep.Value;
-        preset.jammerPattern      = ddPattern.Value;
-        preset.framesPerBurst     = spFramesPerBurst.Value;
-        preset.txPeriodFrames     = spTxPeriodFrames.Value;
-        preset.numBursts          = spNumBursts.Value;
-        preset.singleShotBurst    = spSingleShotBurst.Value;
-        preset.delayBeforeStartSec= spDelayBeforeStart.Value;
-        preset.jamPowerScale      = slPower.Value;
-        preset.dryRun             = cbDryRun.Value;
+        preset.modeId         = ddMode.Value;
+        preset.txOffsetSec    = spTxOffset.Value;
+        preset.txDurationSec  = spTxDuration.Value;
+        preset.txIntervalSec  = spTxInterval.Value;
+        preset.txCount        = spTxCount.Value;
+        preset.jmOffsetSec    = spJamOffset.Value;
+        preset.jmDurationSec  = spJamDuration.Value;
+        preset.jmIntervalSec  = spJamInterval.Value;
+        preset.jmCount        = spJamCount.Value;
+        preset.runSec         = spTotal.Value;
+        preset.jamPowerScale  = slJamPower.Value;
+        preset.noisePower     = slNoisePower.Value;
+        preset.dryRun         = cbDryRun.Value;
     end
 
     function apply_preset(p)
         if isfield(p,'modeId') && ismember(p.modeId, modeIdData)
             ddMode.Value = p.modeId;
         end
-        if isfield(p,'sweepExtras'),         efSweep.Value            = p.sweepExtras;          end
-        if isfield(p,'jammerPattern')
-            try, ddPattern.Value = p.jammerPattern; catch, end
-        end
-        if isfield(p,'framesPerBurst'),      spFramesPerBurst.Value   = p.framesPerBurst;       end
-        if isfield(p,'txPeriodFrames'),      spTxPeriodFrames.Value   = p.txPeriodFrames;       end
-        if isfield(p,'numBursts'),           spNumBursts.Value        = p.numBursts;            end
-        if isfield(p,'singleShotBurst'),     spSingleShotBurst.Value  = p.singleShotBurst;      end
-        if isfield(p,'delayBeforeStartSec'), spDelayBeforeStart.Value = p.delayBeforeStartSec;  end
+        set_if(p,'txOffsetSec',   spTxOffset);
+        set_if(p,'txDurationSec', spTxDuration);
+        set_if(p,'txIntervalSec', spTxInterval);
+        set_if(p,'txCount',       spTxCount);
+        set_if(p,'jmOffsetSec',   spJamOffset);
+        set_if(p,'jmDurationSec', spJamDuration);
+        set_if(p,'jmIntervalSec', spJamInterval);
+        set_if(p,'jmCount',       spJamCount);
+        set_if(p,'runSec',        spTotal);
         if isfield(p,'jamPowerScale')
-            slPower.Value = max(slPower.Limits(1), min(slPower.Limits(2), p.jamPowerScale));
-            lblPower.Text = sprintf('%.2f', slPower.Value);
+            slJamPower.Value = clamp_slider(slJamPower, p.jamPowerScale);
+            lblJamPower.Text = sprintf('%.2f', slJamPower.Value);
         end
-        if isfield(p,'dryRun'),              cbDryRun.Value           = logical(p.dryRun);      end
+        if isfield(p,'noisePower')
+            slNoisePower.Value = clamp_slider(slNoisePower, p.noisePower);
+            lblNoisePower.Text = sprintf('%.2f', slNoisePower.Value);
+        end
+        if isfield(p,'dryRun'), cbDryRun.Value = logical(p.dryRun); end
+    end
+
+    function set_if(p, field, sp)
+        if isfield(p, field)
+            sp.Value = max(sp.Limits(1), min(sp.Limits(2), p.(field)));
+        end
     end
 end
 
@@ -289,10 +295,32 @@ end
 %  Helpers
 % =====================================================================
 
-function sp = add_spinner(gl, label, val, lims)
+function sp = add_int_spinner(gl, label, val, lims)
     uilabel(gl, 'Text', label);
     sp = uispinner(gl, 'Value', val, 'Limits', lims, 'Step', 1, ...
                        'RoundFractionalValues', true);
+end
+
+function sp = add_dbl_spinner(gl, label, val, lims, step)
+    uilabel(gl, 'Text', label);
+    sp = uispinner(gl, 'Value', val, 'Limits', lims, 'Step', step, ...
+                       'ValueDisplayFormat', '%.2f');
+end
+
+function [sl, lbl] = add_power_slider(gl, label, val)
+    uilabel(gl, 'Text', label);
+    row = uigridlayout(gl, [1 2]);
+    row.ColumnWidth   = {'1x', 50};
+    row.ColumnSpacing = 8;
+    row.Padding       = [0 0 0 0];
+    sl  = uislider(row, 'Limits', [0 2], 'Value', val);
+    lbl = uilabel(row, 'Text', sprintf('%.2f', val));
+    sl.ValueChangingFcn = @(s,e) set(lbl, 'Text', sprintf('%.2f', e.Value));
+    sl.ValueChangedFcn  = @(s,e) set(lbl, 'Text', sprintf('%.2f', s.Value));
+end
+
+function v = clamp_slider(sl, x)
+    v = max(sl.Limits(1), min(sl.Limits(2), x));
 end
 
 function safe_release(obj)
@@ -300,54 +328,27 @@ function safe_release(obj)
 end
 
 function run_dry(params, burst, phase, uiCtx)
-% run_dry  Stand-in for run_tx_burst that needs no USRP.  Walks the
-% burst timeline at 10x real speed so you can verify the UI without
-% hardware (Start/Stop responsiveness, progress label progression,
-% validation errors).  Does NOT exercise jammer waveform code.
+% run_dry  Walks the TX timeline at 10x real speed so you can verify
+% the UI without hardware.  Does NOT exercise jammer waveform code.
 
-    spec = params.spec;
-    [real_frame, ~, ~] = build_frame(spec);
+    [real_frame, ~, ~] = build_frame(params.spec);
     framePeriodSec  = length(real_frame) / params.tx.fs;
     sleepPerIter    = max(framePeriodSec / 10, 0.001);
+    stopAtFrames    = ceil(burst.runSeconds * (params.tx.fs / length(real_frame)));
 
-    if burst.runSeconds > 0
-        stopMode = 'time';   stopAt = burst.runSeconds / 10;
-    else
-        stopMode = 'bursts'; stopAt = burst.numBursts * burst.txPeriodFrames;
-    end
+    fprintf(['[dry] mode=%d  runSec=%.1f  ' ...
+             'TX off=%d on=%d period=%d count=%d  ' ...
+             'JAM off=%d on=%d period=%d count=%d\n'], ...
+            phase.mode, burst.runSeconds, ...
+            burst.txStartOffsetFrames, burst.framesPerBurst, burst.txPeriodFrames, burst.numBursts, ...
+            burst.jamStartOffsetFrames, burst.jamOnFrames, burst.jamPeriodFrames, burst.jamMaxFires);
 
-    fprintf('[dry] mode=%d pattern=%s  framesPerBurst=%d txPeriodFrames=%d numBursts=%d\n', ...
-            phase.mode, burst.jammerPattern, burst.framesPerBurst, ...
-            burst.txPeriodFrames, burst.numBursts);
-
-    if burst.delayBeforeStartSec > 0
-        t_d = tic;
-        while toc(t_d) < (burst.delayBeforeStartSec / 10)
-            if uiCtx.shouldStop(), return; end
-            pause(0.05);
-        end
-    end
-
-    t0 = tic; iter = 0; underrunCnt = 0; lastBurst = -1;
-    while keep_dry(t0, iter, stopMode, stopAt)
+    t0 = tic; iter = 0; underrunCnt = 0;
+    while iter < stopAtFrames
         if uiCtx.shouldStop(), break; end
-        iter     = iter + 1;
-        frameIdx = iter - 1;
-        burstIdx = floor(frameIdx / burst.txPeriodFrames) + 1;
-        if burstIdx ~= lastBurst
-            lastBurst = burstIdx;
-            fprintf('[dry] burst %d starts (sim %.2fs)\n', burstIdx, toc(t0));
-        end
+        iter = iter + 1;
         pause(sleepPerIter);
-        uiCtx.onProgress(iter, burstIdx, underrunCnt);
+        uiCtx.onProgress(iter, 1, underrunCnt);
     end
-    fprintf('[dry] complete. iters=%d\n', iter);
-end
-
-function go = keep_dry(t0, iter, stopMode, stopAt)
-    switch stopMode
-        case 'time',   go = toc(t0) < stopAt;
-        case 'bursts', go = iter < stopAt;
-        otherwise,     go = false;
-    end
+    fprintf('[dry] complete. iters=%d (sim %.2fs)\n', iter, toc(t0));
 end

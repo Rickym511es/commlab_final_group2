@@ -112,7 +112,7 @@ function run_rx_loop(params, sched, rx)
             sa(data);
             ts_rx([real(data(:)), imag(data(:))]);
             if res.detected
-                cd_rx(res.eq_data_syms(:));
+                cd_rx(complex(res.eq_data_syms(:)));
                 newpts = res.eq_raw_syms(flowerSC, :);  newpts = newpts(:);
                 m = numel(newpts);
                 if isempty(flowerBuf)
@@ -125,7 +125,7 @@ function run_rx_loop(params, sched, rx)
                     flowerBuf(idx) = newpts;
                     flowerWr = mod(flowerWr + m, flowerMax);
                 end
-                cd_flower(flowerBuf / (rms(flowerBuf)+eps));
+                cd_flower(complex(flowerBuf / (rms(flowerBuf)+eps)));
             end
 
             detRate  = mean(recentDet);

@@ -16,11 +16,16 @@ function burst = default_burst_opts()
 %   thinking: framesPerSec = params.tx.fs / refs.frame_len.
 
     % --- TX duty cycle -------------------------------------------------
-    burst.framesPerBurst    = 100;     % TX-on portion of one period
-    burst.txPeriodFrames    = 250;     % full period; off = period - on
-    burst.numBursts         = 20;      % stop after this many TX bursts
-                                       %   (override with runSeconds if 0)
-    burst.runSeconds        = 0;       % if > 0, takes precedence over numBursts
+    burst.framesPerBurst        = 100;     % TX-on portion of one period
+    burst.txPeriodFrames        = 250;     % full period; off = period - on
+    burst.numBursts             = 20;      % stop after this many TX bursts
+                                           %   (override with runSeconds if 0)
+                                           %   when runSeconds > 0, TX also
+                                           %   goes silent after this many
+                                           %   bursts even if time remains
+    burst.runSeconds            = 0;       % if > 0, takes precedence over numBursts
+    burst.txStartOffsetFrames   = 0;       % skip this many frames of silence
+                                           %   before the first TX burst
 
     % --- TX pre-burst silence (RX warm-up window) ---------------------
     burst.delayBeforeStartSec = 0;     % seconds of zeros before first burst;
@@ -40,10 +45,14 @@ function burst = default_burst_opts()
     burst.jammerPattern     = 'continuous';
 
     % --- 'periodic' tunables ------------------------------------------
-    burst.jamOnFrames       = 100;
-    burst.jamPeriodFrames   = 200;
-    burst.alignJamToTx      = false;   % true: jammer mirrors TX duty
-                                       %   (fires iff TX on)
+    burst.jamOnFrames           = 100;
+    burst.jamPeriodFrames       = 200;
+    burst.alignJamToTx          = false;   % true: jammer mirrors TX duty
+                                           %   (fires iff TX on)
+    burst.jamStartOffsetFrames  = 0;       % skip this many frames before
+                                           %   first period starts
+    burst.jamMaxFires           = 0;       % 0 = unlimited; >0 = stop after
+                                           %   this many complete periods
 
     % --- 'random' / 'random_bursts' tunables --------------------------
     burst.jamRandomProb     = 0.30;    % per-frame or per-burst fire prob

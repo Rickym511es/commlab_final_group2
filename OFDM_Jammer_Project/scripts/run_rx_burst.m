@@ -17,26 +17,30 @@ function run_rx_burst(params, burst, phase, rx, uiCtx)
         uiCtx = struct('shouldStop', @() false, ...
                        'onBucket',   @(varargin) []);
     end
+    if ~isfield(uiCtx, 'headless'), uiCtx.headless = false; end
 
     spec = params.spec;
     [~, ~, refs] = build_frame(spec);
 
-    sa = spectrumAnalyzer('SampleRate', params.rx.fs, ...
-        'ViewType','spectrum-and-spectrogram', ...
-        'Title','RX Spectrum','ShowLegend',false);
-    ts_rx = timescope('SampleRate', params.rx.fs, ...
-        'TimeSpanSource','property','TimeSpan', params.rx.samplesPerFrame/params.rx.fs, ...
-        'Title','RX Time Domain', ...
-        'ChannelNames',{'In-phase (I)','Quadrature (Q)'}, ...
-        'AxesScaling','Auto');
-    ref_const = qammod(0:spec.qam_num-1, spec.qam_num, 'UnitAveragePower', true);
-    cd_rx = comm.ConstellationDiagram( ...
-        'Title','RX Equalized Constellation', ...
-        'ShowReferenceConstellation',true, ...
-        'ReferenceConstellation',ref_const, ...
-        'XLimits',[-2 2],'YLimits',[-2 2]);
+    sa = []; ts_rx = []; cd_rx = []; dash = [];
+    if ~uiCtx.headless
+        sa = spectrumAnalyzer('SampleRate', params.rx.fs, ...
+            'ViewType','spectrum-and-spectrogram', ...
+            'Title','RX Spectrum','ShowLegend',false);
+        ts_rx = timescope('SampleRate', params.rx.fs, ...
+            'TimeSpanSource','property','TimeSpan', params.rx.samplesPerFrame/params.rx.fs, ...
+            'Title','RX Time Domain', ...
+            'ChannelNames',{'In-phase (I)','Quadrature (Q)'}, ...
+            'AxesScaling','Auto');
+        ref_const = qammod(0:spec.qam_num-1, spec.qam_num, 'UnitAveragePower', true);
+        cd_rx = comm.ConstellationDiagram( ...
+            'Title','RX Equalized Constellation', ...
+            'ShowReferenceConstellation',true, ...
+            'ReferenceConstellation',ref_const, ...
+            'XLimits',[-2 2],'YLimits',[-2 2]);
 
-    dash = make_dashboard();
+        dash = make_dashboard();
+    end
     c = onCleanup(@() rx_cleanup(sa, cd_rx, ts_rx));
 
     fprintf('Warm-up...\n');
@@ -69,6 +73,7 @@ function run_rx_burst(params, burst, phase, rx, uiCtx)
     WIN = 40;
     recentDet = false(1,WIN); recentSNR = nan(1,WIN); recentBER = nan(1,WIN);
     ridx = 0; curTight = NaN;
+    prevJammed = false;     % for ATTACK-DETECTED edge transitions
 
     % --- gap-based TX-burst inference ---
     framesPerSec    = params.tx.fs / refs.frame_len;
@@ -248,14 +253,8 @@ function run_rx_burst(params, burst, phase, rx, uiCtx)
             end
         end
 
-        % live dashboard refresh
+        % periodic detection + (optional) live dashboard refresh
         if mod(iter, params.rx.displayEvery) == 0
-            sa(data);
-            ts_rx([real(data(:)), imag(data(:))]);
-            if res.detected
-                cd_rx(res.eq_data_syms(:));
-            end
-
             detRate  = mean(recentDet);
             recSNR   = mean(recentSNR, 'omitnan');
             recBER   = mean(recentBER, 'omitnan');
@@ -266,8 +265,10 @@ function run_rx_burst(params, burst, phase, rx, uiCtx)
                 cumCrcDash = NaN;
             end
 
-            if elapsed < params.sched.calibSeconds || isnan(baselineSNR)
+            calibrating = elapsed < params.sched.calibSeconds || isnan(baselineSNR);
+            if calibrating
                 statusTxt = 'CALIBRATING...'; statusCol = [0.85 0.65 0.1];
+                jammed = false;
             else
                 jammed = false;
                 if ~isnan(recSNR) && recSNR < baselineSNR - params.detect.snrDropDb, jammed = true; end
@@ -281,14 +282,37 @@ function run_rx_burst(params, burst, phase, rx, uiCtx)
                 end
             end
 
-            update_dashboard(dash, statusTxt, statusCol, totalFramesDet, ...
-                detRate, recBER, recSNR, baselineSNR, tputKbps, cumCrcDash);
+            % terminal events on jammed-state edges (post-calibration)
+            if ~calibrating && jammed ~= prevJammed
+                if jammed
+                    fprintf(['[%6.1fs] >>> ATTACK DETECTED  ' ...
+                             'recSNR=%.1fdB (base %.1f)  recBER=%.2e  ' ...
+                             'detRate=%.0f%%  cumCRC=%.0f%%\n'], ...
+                            elapsed, recSNR, baselineSNR, recBER, ...
+                            100*detRate, 100*cumCrcDash);
+                else
+                    fprintf('[%6.1fs] <<< attack cleared  recSNR=%.1fdB  recBER=%.2e\n', ...
+                            elapsed, recSNR, recBER);
+                end
+                prevJammed = jammed;
+            end
 
-            wantTight = strcmp(statusTxt, 'LINK OK');
-            if ~isequal(wantTight, curTight)
-                if wantTight, lim = 1.4; else, lim = 2.5; end
-                try, cd_rx.XLimits = [-lim lim]; cd_rx.YLimits = [-lim lim]; catch, end
-                curTight = wantTight;
+            if ~uiCtx.headless
+                sa(data);
+                ts_rx([real(data(:)), imag(data(:))]);
+                if res.detected
+                    cd_rx(complex(res.eq_data_syms(:)));
+                end
+
+                update_dashboard(dash, statusTxt, statusCol, totalFramesDet, ...
+                    detRate, recBER, recSNR, baselineSNR, tputKbps, cumCrcDash);
+
+                wantTight = strcmp(statusTxt, 'LINK OK');
+                if ~isequal(wantTight, curTight)
+                    if wantTight, lim = 1.4; else, lim = 2.5; end
+                    try, cd_rx.XLimits = [-lim lim]; cd_rx.YLimits = [-lim lim]; catch, end
+                    curTight = wantTight;
+                end
             end
         end
     end
